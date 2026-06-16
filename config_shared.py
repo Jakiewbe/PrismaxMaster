@@ -1,0 +1,25 @@
+"""
+PRISMAX 共享配置
+供 Bridge / StateReader / 启动器 共用，避免硬编码分散。
+"""
+
+BRIDGE_HOST = "127.0.0.1"
+BRIDGE_PORT = 5000
+
+# HTTP 相关
+HTTP_TIMEOUT = 2  # 秒
+HTTP_RETRY_INTERVAL = 3  # 秒
+HTTP_MAX_CONSECUTIVE_FAILS = 3
+
+# 状态过期判定（秒）
+STATE_STALE_SECONDS = 8
+JS_HEARTBEAT_STALE_SECONDS = 8
+PYTHON_HEARTBEAT_STALE_SECONDS = 5
+SUPERVISOR_POLL_SECONDS = 2
+
+# 文件
+STATE_FILE = "prismax_state.json"
+PYTHON_HEARTBEAT_FILE = "python_heartbeat.json"
+
+# 调试
+DEBUG = False

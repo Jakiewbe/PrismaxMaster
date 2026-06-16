@@ -1,0 +1,3131 @@
+// ==UserScript==
+// @name        PrismaX 无忧助手 V2.5.2 (通知系统 + 状态控制器 + HTTP Bridge + 性能优化 + 连续异常退出)
+// @namespace   http://tampermonkey.net/
+// @version     2.5.2
+// @description 完整版：跨端联动 + 通知系统 + HTTP 实时同步 + 静候模式性能优化 + 连续异常自动退出
+// @author      Gemini & Jack & Claude
+// @match       https://app.prismax.ai/*
+// @grant       none
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    window.__PRISMAX_SCRIPT_LOADED_AT = Date.now();
+    window.__PRISMAX_LOOP_HEARTBEAT_AT = Date.now();
+    window.__PRISMAX_LAST_ERROR = '';
+
+    // ============================================================
+    // 🔧 内置配置（直接修改这里，无需额外脚本）
+    // ============================================================
+    const BUILTIN_CONFIG = {
+        pushdeerKey: '',  // ← 填入你的 PushDeer Key，如 'PDU12345'
+    };
+
+    const USER_CONFIG = (function() {
+        const external = window.PRISMAX_USER_CONFIG || {};
+        const merged = { ...BUILTIN_CONFIG };
+        for (const k of Object.keys(external)) {
+            if (external[k] !== undefined && external[k] !== null && external[k] !== '') {
+                merged[k] = external[k];
+            }
+        }
+        // 兼容旧写法：pushdeerKey 也作为顶层 key
+        if (!merged.pushdeerKey && external.pushdeerKey) {
+            merged.pushdeerKey = external.pushdeerKey;
+        }
+        return merged;
+    })();
+
+    function mergeConfig(base, override) {
+        const output = { ...base };
+        if (!override || typeof override !== 'object') return output;
+        for (const [key, value] of Object.entries(override)) {
+            if (value && typeof value === 'object' && !Array.isArray(value) && base[key] && typeof base[key] === 'object' && !Array.isArray(base[key])) {
+                output[key] = mergeConfig(base[key], value);
+            } else {
+                output[key] = value;
+            }
+        }
+        return output;
+    }
+
+    function recordScriptError(scope, error) {
+        const message = `[${scope}] ${error && error.message ? error.message : String(error)}`;
+        window.__PRISMAX_LAST_ERROR = message;
+        console.error('[PRISMAX脚本错误]', message, error);
+    }
+
+    window.addEventListener('error', (event) => {
+        recordScriptError('window.error', event.error || event.message);
+    });
+
+    window.addEventListener('unhandledrejection', (event) => {
+        recordScriptError('unhandledrejection', event.reason || 'Promise rejected');
+    });
+
+    // ============================================================
+    // 🔔 通知系统模块
+    // ============================================================
+    const PrismaXNotifier = (function() {
+        'use strict';
+
+        const CONFIG = {
+            type: 'pushdeer',
+            pushdeer: {
+                key: USER_CONFIG.pushdeerKey || '',// ← 在 window.PRISMAX_USER_CONFIG.pushdeerKey 中配置
+
+                api: 'https://api2.pushdeer.com/message/push'
+            },
+            wecom: { webhook: '' },
+            serverchan: {
+                key: '',  // ← 填写你的 SendKey
+                api: 'https://sctapi.ftqq.com'
+            },
+            telegram: { botToken: '', chatId: '', api: 'https://api.telegram.org' },
+            cooldown: 60,
+            debug: true
+        };
+
+        const state = {
+            lastNotificationTime: {},
+            totalSent: 0,
+            totalFailed: 0
+        };
+
+        const LEVEL = {
+            INFO: 'INFO',
+            SUCCESS: 'SUCCESS',
+            WARNING: 'WARNING',
+            CRITICAL: 'CRITICAL'
+        };
+
+        const ICONS = {
+            INFO: '🎉',
+            SUCCESS: '✅',
+            WARNING: '⚠️',
+            CRITICAL: '🚨'
+        };
+
+        function log(...args) {
+            if (CONFIG.debug) console.log('[PRISMAX通知]', ...args);
+        }
+
+        function formatTime() {
+            return new Date().toLocaleString('zh-CN', {
+                year: 'numeric', month: '2-digit', day: '2-digit',
+                hour: '2-digit', minute: '2-digit', second: '2-digit',
+                hour12: false
+            });
+        }
+
+        function checkCooldown(key, force) {
+            if (force) return true;
+            const now = Date.now();
+            const lastTime = state.lastNotificationTime[key] || 0;
+            const elapsed = (now - lastTime) / 1000;
+            if (elapsed < CONFIG.cooldown) {
+                log(`冷却中，${Math.ceil(CONFIG.cooldown - elapsed)}秒后可再次发送`);
+                return false;
+            }
+            return true;
+        }
+
+        function updateCooldown(key) {
+            state.lastNotificationTime[key] = Date.now();
+        }
+
+        function send(title, content, level = LEVEL.INFO, force = false) {
+            const notificationKey = `${level}:${title}`;
+            if (!checkCooldown(notificationKey, force)) return;
+
+            const icon = ICONS[level] || '📬';
+            const fullTitle = `${icon} ${title}`;
+            const fullContent = `${content}\n\n⏰ ${formatTime()}`;
+
+            updateCooldown(notificationKey);
+            sendAsync(fullTitle, fullContent, level);
+        }
+
+        async function sendAsync(title, content, level) {
+            log(`发送通知: ${title}`);
+            try {
+                let success = false;
+                switch (CONFIG.type) {
+                    case 'pushdeer': success = await sendPushDeer(title, content); break;
+                    case 'wecom': success = await sendWeCom(title, content); break;
+                    case 'serverchan': success = await sendServerChan(title, content); break;
+                    case 'telegram': success = await sendTelegram(title, content); break;
+                }
+                if (success) {
+                    state.totalSent++;
+                    log(`✓ 发送成功`);
+                } else {
+                    state.totalFailed++;
+                    log(`✗ 发送失败`);
+                }
+            } catch (error) {
+                state.totalFailed++;
+                log(`✗ 发送异常:`, error);
+            }
+        }
+
+        async function sendPushDeer(title, content) {
+            const key = CONFIG.pushdeer.key;
+            if (!key || key === 'PDU123XXX') {
+                log('PushDeer Key 未配置');
+                return false;
+            }
+            try {
+                const formData = new FormData();
+                formData.append('pushkey', key);
+                formData.append('text', title);
+                formData.append('desp', content);
+                formData.append('type', 'markdown');
+                const response = await fetch(CONFIG.pushdeer.api, { method: 'POST', body: formData });
+                const result = await response.json();
+                return result.code === 0;
+            } catch (error) {
+                log('PushDeer 错误:', error);
+                return false;
+            }
+        }
+
+        async function sendWeCom(title, content) {
+            const webhook = CONFIG.wecom.webhook;
+            if (!webhook) return false;
+            try {
+                const data = { msgtype: 'markdown', markdown: { content: `## ${title}\n\n${content}` }};
+                const response = await fetch(webhook, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                const result = await response.json();
+                return result.errcode === 0;
+            } catch (error) {
+                return false;
+            }
+        }
+
+        async function sendServerChan(title, content) {
+            const key = CONFIG.serverchan.key;
+            if (!key) return false;
+            try {
+                const url = `${CONFIG.serverchan.api}/${key}.send`;
+                const formData = new FormData();
+                formData.append('title', title);
+                formData.append('desp', content);
+                const response = await fetch(url, { method: 'POST', body: formData });
+                const result = await response.json();
+                return result.code === 0;
+            } catch (error) {
+                return false;
+            }
+        }
+
+        async function sendTelegram(title, content) {
+            const token = CONFIG.telegram.botToken;
+            const chatId = CONFIG.telegram.chatId;
+            if (!token || !chatId) return false;
+            try {
+                const url = `${CONFIG.telegram.api}/bot${token}/sendMessage`;
+                const text = `<b>${title}</b>\n\n${content}`;
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ chat_id: chatId, text: text, parse_mode: 'HTML' })
+                });
+                const result = await response.json();
+                return result.ok === true;
+            } catch (error) {
+                return false;
+            }
+        }
+
+        function notifyQueueSuccess(count) {
+            send('🎯 开始操作', 
+                `📍 第 ${count} 次操作开始\n\n` +
+                `⏰ 开始时间：${formatTime()}`,
+                LEVEL.INFO);
+        }
+
+        // 🆕 优化版：包含详细操作信息
+        function notifyOperationComplete(successCount, anomalyCount, details = {}) {
+            const total = successCount + anomalyCount;
+            const rate = total > 0 ? (successCount / total * 100).toFixed(1) : 0;
+            const duration = details.duration || 0;
+            const operationNum = details.operationNum || successCount;
+            
+            let content = `📍 第 ${operationNum} 次操作完成\n`;
+            content += `⏱️ 操作时长：${duration} 秒\n\n`;
+            content += `📊 今日统计：\n`;
+            content += `   ✅ 成功：${successCount} 次\n`;
+            content += `   ❌ 异常：${anomalyCount} 次\n`;
+            content += `   📈 成功率：${rate}%`;
+            
+            send('✅ 操作完成', content, LEVEL.SUCCESS);
+        }
+        
+        // 🆕 新增：操作异常通知（包含原因）
+        function notifyOperationAnomaly(anomalyCount, consecutiveCount, details = {}) {
+            const duration = details.duration || 0;
+            const minRequired = details.minRequired || 40;
+            const operationNum = details.operationNum || (details.successCount + anomalyCount);
+            const successCount = details.successCount || 0;
+            const total = successCount + anomalyCount;
+            const rate = total > 0 ? (successCount / total * 100).toFixed(1) : 0;
+            
+            let content = `📍 第 ${operationNum} 次操作异常\n\n`;
+            content += `❓ 异常原因：操作时间过短\n`;
+            content += `   实际时长：${duration} 秒\n`;
+            content += `   最低要求：${minRequired} 秒\n\n`;
+            content += `⚠️ 连续异常：${consecutiveCount} 次\n`;
+            if (consecutiveCount >= 2) {
+                content += `   （达到阈值将自动退出排队）\n`;
+            }
+            content += `\n📊 今日统计：\n`;
+            content += `   ✅ 成功：${successCount} 次\n`;
+            content += `   ❌ 异常：${anomalyCount} 次\n`;
+            content += `   📈 成功率：${rate}%`;
+            
+            send('⚠️ 操作异常', content, LEVEL.WARNING, true);
+        }
+
+        function notifyError(reason) {
+            // 🆕 刷新页面不再发送推送，只记录日志
+            console.log(`[通知系统] 页面刷新: ${reason} (不推送)`);
+        }
+
+        function notifyMorningTrigger() {
+            send('🌅 早八协议触发', 
+                `✅ 已重置队列，正在重新排队\n\n` +
+                `⏰ 触发时间：${formatTime()}`,
+                LEVEL.INFO, true);
+        }
+
+        // 🆕 连续异常警告通知（优化版）
+        function notifyConsecutiveAnomalies(count, totalAnomalies, successCount, cooldownMinutes) {
+            const total = successCount + totalAnomalies;
+            const rate = total > 0 ? (successCount / total * 100).toFixed(1) : 0;
+            
+            let content = `🚨 检测到连续 ${count} 次操作异常\n`;
+            content += `✋ 已自动退出排队\n\n`;
+            content += `🔒 冷却期：${cooldownMinutes} 分钟\n`;
+            content += `   （期间不会自动进入队列）\n\n`;
+            content += `📊 今日统计：\n`;
+            content += `   ✅ 成功：${successCount} 次\n`;
+            content += `   ❌ 异常：${totalAnomalies} 次\n`;
+            content += `   📈 成功率：${rate}%\n\n`;
+            content += `💡 建议：检查网络连接或 Python 端状态`;
+            
+            send('🛑 连续异常警告', content, LEVEL.CRITICAL, true);
+        }
+
+        // 🆕 Python 端断连通知（Bridge 连接失败）
+        function notifyBridgeDisconnected(failCount) {
+            send('🔌 Python 端断连',
+                `❌ 连续 ${failCount} 次无法连接 Python 端\n\n` +
+                `⚠️ 影响：\n` +
+                `   • 键盘操作将停止执行\n` +
+                `   • 操作可能被判定为异常\n\n` +
+                `💡 解决方案：\n` +
+                `   1. 检查 Bridge_v2.py 是否运行\n` +
+                `   2. 检查 prismax_bot 是否运行\n` +
+                `   3. 检查端口 5000 是否被占用\n\n` +
+                `⏰ 时间：${formatTime()}`,
+                LEVEL.CRITICAL, true);
+        }
+        
+        // 🆕 Python 端重连成功通知
+        function notifyPythonReconnected() {
+            send('✅ Python 端已重连',
+                `🔗 与 Python 端的连接已恢复\n\n` +
+                `⏰ 时间：${formatTime()}`,
+                LEVEL.SUCCESS, true);
+        }
+
+        function sendTest() {
+            send('测试通知',
+                `如果你收到这条消息，说明通知系统配置成功！\n\n配置类型: ${CONFIG.type}\n时间: ${formatTime()}`,
+                LEVEL.INFO, true);
+            log('测试通知已发送，请检查手机');
+        }
+
+        // 🆕 评论任务完成通知（优化版）
+        function notifyCommentTaskComplete(commentCount) {
+            send('💬 评论任务完成',
+                `✅ 已成功在 Live Chat 发送 ${commentCount} 条评论\n\n` +
+                `⏰ 完成时间：${formatTime()}`,
+                LEVEL.SUCCESS, true);
+        }
+
+        return {
+            send, notifyQueueSuccess, notifyOperationComplete, notifyOperationAnomaly, notifyError,
+            notifyMorningTrigger, notifyConsecutiveAnomalies, notifyBridgeDisconnected, 
+            notifyPythonReconnected, sendTest, notifyCommentTaskComplete, LEVEL,
+            get config() { return CONFIG; }
+        };
+    })();
+
+    // ============================================================
+    // 🎮 状态控制器 + HTTP Bridge + 性能优化
+    // ============================================================
+    const PrismaXController = (function() {
+        'use strict';
+
+        const CONFIG = mergeConfig({
+            // 正常模式频率
+            updateInterval: 500,
+            pushInterval: 500,
+
+            // 静候模式频率
+            standbyUpdateInterval: 3000,
+            standbyPushInterval: 3000,
+            standbyRankThreshold: 100,
+            highRankStandbyThreshold: 100,
+            standbyEnabled: true,
+
+            bridgeUrl: 'http://127.0.0.1:5000',
+            enablePush: true,
+            enableLocalStorage: true,
+            maxRetries: 3,
+            titlePrefix: 'PrismaX',
+            titleOperating: 'PrismaX - OPERATING',
+            titleQueuing: 'PrismaX - QUEUING',
+            titleStandby: 'PrismaX - STANDBY',
+
+            // 🆕 连续异常退出配置
+            consecutiveAnomalyThreshold: 2,  // 连续异常阈值（次）
+            enableAnomalyAutoLeave: true,    // 启用自动退出
+            anomalyCooldownMinutes: 60        // 退出后冷却期（分钟）- 从30改为60
+        }, USER_CONFIG.controller || {});
+
+        const state = {
+            isOperating: false,
+            isQueuing: false,
+            isStandby: true,
+            sessionStartTime: 0,
+            totalOperations: 0,
+            anomalyCount: 0,
+            consecutiveAnomalies: 0,  // 🆕 连续异常计数
+            anomalyCooldownUntil: 0,   // 🆕 异常退出冷却期结束时间
+            updateTimer: null,
+            pushTimer: null,
+            pushRetries: 0,
+            lastPushTime: 0,
+            lastPushSuccess: true,
+            consecutivePushFailures: 0,
+
+            // 性能优化状态
+            isInStandbyMode: false,
+            currentUpdateInterval: 500,
+            currentPushInterval: 500,
+            lastRank: null,
+            loopHeartbeatAt: Date.now(),
+            lastScriptError: '',
+            
+            // 🆕 事件日志队列
+            pendingEventLogs: [],
+
+            // 🔒 钱包弹窗检测
+            walletPopupActive: false,
+            walletPopupLastSeen: 0
+        };
+        
+        // 🆕 添加事件到日志队列（下次推送时发送）
+        function queueEventLog(eventType, eventData) {
+            state.pendingEventLogs.push({
+                type: eventType,
+                data: eventData,
+                time: new Date().toISOString()
+            });
+            log(`[事件日志] 已排队: ${eventType}`);
+        }
+
+        function log(...args) {
+            console.log('[状态控制器]', ...args);
+        }
+
+        function findButton(keywords) {
+            const candidates = Array.from(document.querySelectorAll('button, div[role="button"]'));
+            return candidates.find(el => {
+                if (!el.offsetParent) return false;
+                const text = el.innerText || el.textContent || '';
+                return keywords.some(k => text.includes(k));
+            });
+        }
+
+        function adjustPerformanceMode(rank) {
+            if (!CONFIG.standbyEnabled) return;
+
+            const shouldEnterStandby = rank !== null && rank > CONFIG.standbyRankThreshold;
+            const wasInStandby = state.isInStandbyMode;
+
+            if (shouldEnterStandby && !wasInStandby) {
+                state.isInStandbyMode = true;
+                state.currentUpdateInterval = CONFIG.standbyUpdateInterval;
+                state.currentPushInterval = CONFIG.standbyPushInterval;
+
+                console.log('[性能优化] ⚡ 进入静候模式（省电模式）');
+                console.log(`   排名：#${rank} > ${CONFIG.standbyRankThreshold}`);
+                console.log(`   检测间隔：${CONFIG.updateInterval}ms → ${CONFIG.standbyUpdateInterval}ms`);
+                console.log(`   推送间隔：${CONFIG.pushInterval}ms → ${CONFIG.standbyPushInterval}ms`);
+
+                restartTimers();
+            }
+            else if (!shouldEnterStandby && wasInStandby) {
+                state.isInStandbyMode = false;
+                state.currentUpdateInterval = CONFIG.updateInterval;
+                state.currentPushInterval = CONFIG.pushInterval;
+
+                console.log('[性能优化] ⚡ 退出静候模式（恢复正常频率）');
+                if (rank !== null) {
+                    console.log(`   排名：#${rank} ≤ ${CONFIG.standbyRankThreshold}`);
+                }
+
+                restartTimers();
+            }
+
+            state.lastRank = rank;
+        }
+
+        function restartTimers() {
+            if (state.updateTimer) {
+                clearInterval(state.updateTimer);
+                state.updateTimer = null;
+            }
+            if (state.pushTimer) {
+                clearInterval(state.pushTimer);
+                state.pushTimer = null;
+            }
+
+            state.updateTimer = setInterval(() => {
+                try {
+                    detectPageState();
+                    exportState();
+                } catch (e) {
+                    recordScriptError('controller.updateTimer', e);
+                }
+            }, state.currentUpdateInterval);
+
+            state.pushTimer = setInterval(() => {
+                try {
+                    const stateData = exportState();
+                    pushStateToServer(stateData);
+                } catch (e) {
+                    recordScriptError('controller.pushTimer', e);
+                }
+            }, state.currentPushInterval);
+
+            log(`定时器已重启 - 检测:${state.currentUpdateInterval}ms, 推送:${state.currentPushInterval}ms`);
+        }
+
+        function detectPageState() {
+            const endBtn = findButton(['End Tele-Operation', 'End Session']);
+            const queueBtn = findButton(['Leave', 'Waiting', 'Position', 'Queued']);
+            const enterBtn = findButton(['Enter', 'Start', 'Join']);
+
+            const oldState = {
+                isOperating: state.isOperating,
+                isQueuing: state.isQueuing,
+                isStandby: state.isStandby
+            };
+
+            if (endBtn) {
+                state.isOperating = true;
+                state.isQueuing = false;
+                state.isStandby = false;
+
+                if (!oldState.isOperating) {
+                    onOperationStart();
+                }
+
+                adjustPerformanceMode(null);
+            }
+            else if (queueBtn) {
+                state.isOperating = false;
+                state.isQueuing = true;
+                state.isStandby = false;
+
+                if (oldState.isOperating) {
+                    onOperationEnd();
+                }
+
+                const pageText = document.body.innerText || '';
+                let rankMatch = pageText.match(/(\d{1,4})\s*(?:users?|people)\s+in\s+front/i);
+                let rank = rankMatch ? parseInt(rankMatch[1], 10) + 1 : null;
+
+                if (!rank) {
+                    rankMatch = pageText.match(/Position[:\s]+(\d{1,4})/i);
+                    rank = rankMatch ? parseInt(rankMatch[1], 10) : null;
+                }
+
+                if (!rank) {
+                    rankMatch = pageText.match(/Queue[:\s]+(\d{1,4})/i);
+                    rank = rankMatch ? parseInt(rankMatch[1], 10) : null;
+                }
+
+                adjustPerformanceMode(rank);
+            }
+            else if (enterBtn) {
+                state.isOperating = false;
+                state.isQueuing = false;
+                state.isStandby = true;
+
+                adjustPerformanceMode(null);
+            }
+
+            return state;
+        }
+
+        // 🔒 钱包弹窗检测（防止OKX等钱包弹窗抢焦点导致按键泄漏）
+        function detectWalletPopup() {
+            const now = Date.now();
+
+            // 1. 检测OKX/MetaMask等钱包注入的弹窗iframe
+            const walletIframes = document.querySelectorAll(
+                'iframe[src*="okx"], iframe[src*="metamask"], iframe[src*="wallet"], ' +
+                'iframe[id*="okx"], iframe[id*="wallet"], iframe[class*="wallet"]'
+            );
+            for (const iframe of walletIframes) {
+                if (iframe.offsetParent) {  // 可见的iframe
+                    state.walletPopupActive = true;
+                    state.walletPopupLastSeen = now;
+                    console.log('[钱包检测] ⚠ 检测到钱包弹窗iframe:', iframe.src || iframe.id);
+                    dismissWalletPopup();
+                    return;
+                }
+            }
+
+            // 2. 检测OKX Web3弹窗（常见class/ID模式）
+            const walletModals = document.querySelectorAll(
+                '[class*="okx-wallet"], [class*="okxwallet"], ' +
+                '[id*="okx-wallet"], [id*="okxwallet"], ' +
+                '[class*="wallet-modal"], [class*="wallet-popup"], ' +
+                'div[class*="web3modal"], div[class*="w3m"], ' +
+                'w3m-modal, w3m-core-modal'
+            );
+            for (const modal of walletModals) {
+                if (modal.offsetParent) {
+                    state.walletPopupActive = true;
+                    state.walletPopupLastSeen = now;
+                    console.log('[钱包检测] ⚠ 检测到钱包弹窗元素:', modal.className || modal.id);
+                    dismissWalletPopup();
+                    return;
+                }
+            }
+
+            // 3. 检测密码输入框（钱包特征：带特定placeholder的密码框）
+            const passwordInputs = document.querySelectorAll(
+                'input[type="password"][placeholder*="password" i], ' +
+                'input[type="password"][placeholder*="Password"], ' +
+                'input[type="password"].wallet-password'
+            );
+            for (const input of passwordInputs) {
+                if (input.offsetParent) {
+                    // 检查是否在弹窗/浮层中（非页面主体表单）
+                    const parent = input.closest('[class*="modal"], [class*="popup"], [class*="overlay"], [class*="dialog"], [role="dialog"]');
+                    if (parent) {
+                        state.walletPopupActive = true;
+                        state.walletPopupLastSeen = now;
+                        console.log('[钱包检测] ⚠ 检测到弹窗中的密码输入框');
+                        dismissWalletPopup();
+                        return;
+                    }
+                }
+            }
+
+            // 没检测到钱包弹窗
+            if (state.walletPopupActive && now - state.walletPopupLastSeen > 3000) {
+                state.walletPopupActive = false;
+                console.log('[钱包检测] ✅ 钱包弹窗已消失');
+            }
+        }
+
+        // 🔒 尝试关闭钱包弹窗
+        function dismissWalletPopup() {
+            try {
+                // 方法1: 查找并点击关闭按钮
+                const closeSelectors = [
+                    'button[class*="close"]', 'button[aria-label*="Close"]',
+                    'button[aria-label*="close"]', '[class*="close-btn"]',
+                    '[class*="closeButton"]', 'button[class*="cancel"]',
+                    'svg[class*="close"]', '[data-testid="close"]',
+                    '.modal-close', '.popup-close'
+                ];
+                for (const sel of closeSelectors) {
+                    const closeBtn = document.querySelector(sel);
+                    if (closeBtn && closeBtn.offsetParent) {
+                        closeBtn.click();
+                        console.log('[钱包检测] 🔧 已点击关闭按钮:', sel);
+                        return;
+                    }
+                }
+
+                // 方法2: 点击遮罩层（弹窗背景）
+                const overlays = document.querySelectorAll(
+                    '[class*="overlay"], [class*="backdrop"], [class*="mask"], ' +
+                    '[class*="Overlay"], [class*="Backdrop"]'
+                );
+                for (const overlay of overlays) {
+                    if (overlay.offsetParent) {
+                        overlay.click();
+                        console.log('[钱包检测] 🔧 已点击遮罩层关闭弹窗');
+                        return;
+                    }
+                }
+
+                // 方法3: 发送Escape键到页面
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+                document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+                console.log('[钱包检测] 🔧 已发送Escape键尝试关闭弹窗');
+
+            } catch (e) {
+                console.warn('[钱包检测] 关闭弹窗失败:', e.message);
+            }
+        }
+
+        function onOperationStart() {
+            log('>>> 操作开始');
+            state.sessionStartTime = Date.now();
+
+            // 🆕 记录事件日志
+            queueEventLog('operation_start', {
+                operationCount: state.totalOperations + 1,
+                timestamp: state.sessionStartTime
+            });
+
+            if (typeof PrismaXNotifier !== 'undefined') {
+                const count = state.totalOperations + 1;
+                PrismaXNotifier.notifyQueueSuccess(count);
+            }
+        }
+
+        function onOperationEnd() {
+            log('<<< 操作结束');
+
+            const sessionDuration = Date.now() - state.sessionStartTime;
+            const sessionDurationSec = Math.floor(sessionDuration / 1000);
+            const minSessionTime = 40 * 1000;
+            const minSessionTimeSec = 40;
+
+            if (sessionDuration >= minSessionTime) {
+                // ✅ 正常操作
+                state.totalOperations++;
+                state.consecutiveAnomalies = 0;  // 🆕 重置连续异常计数
+                log(`有效操作 +1，累计：${state.totalOperations}`);
+
+                // 🆕 记录成功事件日志
+                queueEventLog('operation_success', {
+                    duration: sessionDurationSec,
+                    totalOperations: state.totalOperations,
+                    anomalyCount: state.anomalyCount
+                });
+
+                if (typeof PrismaXNotifier !== 'undefined') {
+                    // 🆕 传递详细信息
+                    PrismaXNotifier.notifyOperationComplete(
+                        state.totalOperations,
+                        state.anomalyCount,
+                        {
+                            duration: sessionDurationSec,
+                            operationNum: state.totalOperations + state.anomalyCount  // 总操作序号
+                        }
+                    );
+                }
+            } else {
+                // ❌ 异常操作
+                state.anomalyCount++;
+                state.consecutiveAnomalies++;  // 🆕 连续异常 +1
+                log(`异常操作 +1，累计：${state.anomalyCount}，连续：${state.consecutiveAnomalies}`);
+
+                // 🆕 记录异常事件日志
+                queueEventLog('operation_anomaly', {
+                    duration: sessionDurationSec,
+                    minRequired: minSessionTimeSec,
+                    anomalyCount: state.anomalyCount,
+                    consecutiveAnomalies: state.consecutiveAnomalies
+                });
+
+                // 🆕 发送异常通知（包含详细原因）
+                if (typeof PrismaXNotifier !== 'undefined') {
+                    PrismaXNotifier.notifyOperationAnomaly(
+                        state.anomalyCount,
+                        state.consecutiveAnomalies,
+                        {
+                            duration: sessionDurationSec,
+                            minRequired: minSessionTimeSec,
+                            operationNum: state.totalOperations + state.anomalyCount,
+                            successCount: state.totalOperations
+                        }
+                    );
+                }
+
+                // 🆕 检查是否达到连续异常阈值
+                if (CONFIG.enableAnomalyAutoLeave &&
+                    state.consecutiveAnomalies >= CONFIG.consecutiveAnomalyThreshold) {
+                    log(`🚨 连续异常达到 ${state.consecutiveAnomalies} 次，触发自动退出！`);
+                    handleConsecutiveAnomalies();
+                }
+            }
+
+            state.sessionStartTime = 0;
+        }
+
+        // 🆕 处理连续异常
+        function handleConsecutiveAnomalies() {
+            // 设置冷却期
+            const cooldownMs = CONFIG.anomalyCooldownMinutes * 60 * 1000;
+            state.anomalyCooldownUntil = Date.now() + cooldownMs;
+            log(`🔒 已设置冷却期：${CONFIG.anomalyCooldownMinutes} 分钟`);
+
+            // 🆕 记录连续异常触发事件
+            queueEventLog('consecutive_anomaly_triggered', {
+                consecutiveCount: state.consecutiveAnomalies,
+                cooldownMinutes: CONFIG.anomalyCooldownMinutes,
+                cooldownUntil: state.anomalyCooldownUntil,
+                totalAnomalies: state.anomalyCount,
+                totalOperations: state.totalOperations
+            });
+
+            // 🆕 持久化冷却期到 localStorage（页面刷新不丢失）
+            try {
+                localStorage.setItem('prismax_anomaly_cooldown', String(state.anomalyCooldownUntil));
+                localStorage.setItem('prismax_consecutive_anomalies', String(state.consecutiveAnomalies));
+                log('✅ 冷却期已保存到 localStorage');
+            } catch (e) {
+                console.error('[冷却期] localStorage 保存失败:', e);
+            }
+
+
+            // 发送通知
+            if (typeof PrismaXNotifier !== 'undefined') {
+                PrismaXNotifier.notifyConsecutiveAnomalies(
+                    state.consecutiveAnomalies,
+                    state.anomalyCount,
+                    state.totalOperations,
+                    CONFIG.anomalyCooldownMinutes  // 传入冷却期时长
+                );
+            }
+
+            // 查找并点击 Leave 按钮
+            const leaveBtn = findButton(['Leave', 'Exit']);
+            if (leaveBtn) {
+                console.log('[自动退出] 找到 Leave 按钮，正在退出排队...');
+                try {
+                    leaveBtn.click();
+                    log('✅ 已点击 Leave 按钮，成功退出排队');
+                    log(`⏰ 冷却期：${CONFIG.anomalyCooldownMinutes} 分钟内不会自动进入队列`);
+                } catch (e) {
+                    console.error('[自动退出] 点击按钮失败:', e);
+                }
+            } else {
+                console.warn('[自动退出] ⚠️ 未找到 Leave 按钮');
+            }
+
+            // 重置连续异常计数
+            state.consecutiveAnomalies = 0;
+        }
+
+        function exportState() {
+            state.loopHeartbeatAt = window.__PRISMAX_LOOP_HEARTBEAT_AT || Date.now();
+            state.lastScriptError = window.__PRISMAX_LAST_ERROR || '';
+
+            // 🔒 检测钱包弹窗
+            detectWalletPopup();
+
+            // 🔒 如果钱包弹窗活跃，强制禁止操作（防止按键泄漏到密码框）
+            const effectiveAllowOperation = state.isOperating && !state.walletPopupActive;
+
+            const currentState = {
+                timestamp: Date.now(),
+                updateTime: new Date().toISOString(),
+                allowOperation: effectiveAllowOperation,
+                walletPopupActive: state.walletPopupActive,  // 🔒 钱包弹窗状态
+                isOperating: state.isOperating,
+                isQueuing: state.isQueuing,
+                isStandby: state.isStandby,
+                totalOperations: state.totalOperations,
+                anomalyCount: state.anomalyCount,
+                consecutiveAnomalies: state.consecutiveAnomalies,  // 🆕
+                anomalyCooldownUntil: state.anomalyCooldownUntil,  // 🆕 冷却期状态
+                rank: state.lastRank,
+                performanceMode: state.isInStandbyMode ? 'high_rank_standby' : 'normal',
+                loopHeartbeatAt: state.loopHeartbeatAt,
+                lastScriptError: state.lastScriptError,
+                sessionStartTime: state.sessionStartTime,
+                sessionDuration: state.sessionStartTime > 0
+                    ? Math.floor((Date.now() - state.sessionStartTime) / 1000)
+                    : 0,
+                lastPushTime: state.lastPushTime,
+                lastPushSuccess: state.lastPushSuccess,
+                source: 'http'
+            };
+
+            if (CONFIG.enableLocalStorage) {
+                try {
+                    localStorage.setItem('prismax_state', JSON.stringify(currentState));
+                } catch (e) {
+                    console.error('[LocalStorage写入失败]', e);
+                }
+            }
+
+            if (state.isOperating) {
+                document.title = CONFIG.titleOperating;
+            } else if (state.isQueuing) {
+                document.title = CONFIG.titleQueuing;
+            } else {
+                document.title = CONFIG.titleStandby;
+            }
+
+            return currentState;
+        }
+
+        async function pushStateToServer(stateData) {
+            if (!CONFIG.enablePush) {
+                return;
+            }
+
+            try {
+                // 🆕 如果有待发送的事件日志，附加到推送数据中
+                const dataToSend = { ...stateData };
+                if (state.pendingEventLogs.length > 0) {
+                    dataToSend.eventLog = state.pendingEventLogs;
+                    state.pendingEventLogs = [];  // 清空队列
+                }
+                
+                const response = await fetch(CONFIG.bridgeUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(dataToSend)
+                });
+
+                if (response.ok) {
+                    // 🆕 检测是否从断连状态恢复
+                    const wasDisconnected = state.consecutivePushFailures >= CONFIG.maxRetries;
+                    
+                    state.pushRetries = 0;
+                    state.consecutivePushFailures = 0;
+                    state.lastPushSuccess = true;
+                    state.lastPushTime = Date.now();
+                    
+                    // 🆕 如果之前断连，现在恢复了，发送通知
+                    if (wasDisconnected && typeof PrismaXNotifier !== 'undefined') {
+                        PrismaXNotifier.notifyPythonReconnected();
+                    }
+                } else {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+            } catch (error) {
+                state.lastPushSuccess = false;
+                state.pushRetries++;
+                state.consecutivePushFailures++;
+
+                if (state.consecutivePushFailures === 1) {
+                    console.error('[HTTP推送失败]', error.message);
+                    console.warn('⚠️ 请确保 Bridge.py 中转服务已启动');
+                }
+
+                if (state.consecutivePushFailures >= CONFIG.maxRetries) {
+                    if (state.consecutivePushFailures === CONFIG.maxRetries) {
+                        console.error(`❌ 推送失败超过 ${CONFIG.maxRetries} 次，请检查中转服务`);
+                        
+                        // 🆕 发送手机通知警报
+                        if (typeof PrismaXNotifier !== 'undefined') {
+                            PrismaXNotifier.notifyBridgeDisconnected(state.consecutivePushFailures);
+                        }
+                    }
+                }
+            }
+        }
+
+        function start() {
+            if (state.updateTimer) {
+                log('已经在运行');
+                return;
+            }
+
+            log('启动状态检测');
+            queueEventLog('script_loaded', {
+                loadedAt: window.__PRISMAX_SCRIPT_LOADED_AT,
+                userAgent: navigator.userAgent
+            });
+            queueEventLog('controller_started', {
+                startedAt: Date.now()
+            });
+
+            // 🆕 从 localStorage 恢复冷却期和连续异常计数（防止页面刷新丢失）
+            try {
+                const savedCooldown = localStorage.getItem('prismax_anomaly_cooldown');
+                const savedConsecutive = localStorage.getItem('prismax_consecutive_anomalies');
+                
+                if (savedCooldown) {
+                    const cooldownTime = parseInt(savedCooldown, 10);
+                    if (cooldownTime > Date.now()) {
+                        state.anomalyCooldownUntil = cooldownTime;
+                        const remainingMin = Math.ceil((cooldownTime - Date.now()) / 60000);
+                        log(`🔒 恢复冷却期：还剩 ${remainingMin} 分钟`);
+                    } else {
+                        // 冷却期已过，清理
+                        localStorage.removeItem('prismax_anomaly_cooldown');
+                        localStorage.removeItem('prismax_consecutive_anomalies');
+                        log('冷却期已过期，已清理');
+                    }
+                }
+                
+                if (savedConsecutive) {
+                    state.consecutiveAnomalies = parseInt(savedConsecutive, 10);
+                    if (state.consecutiveAnomalies > 0) {
+                        log(`⚠️ 恢复连续异常计数：${state.consecutiveAnomalies}`);
+                    }
+                }
+            } catch (e) {
+                console.error('[冷却期] localStorage 读取失败:', e);
+            }
+
+
+            state.currentUpdateInterval = CONFIG.updateInterval;
+            state.currentPushInterval = CONFIG.pushInterval;
+
+            state.updateTimer = setInterval(() => {
+                try {
+                    detectPageState();
+                    exportState();
+                } catch (e) {
+                    recordScriptError('controller.updateTimer', e);
+                }
+            }, state.currentUpdateInterval);
+
+            state.pushTimer = setInterval(() => {
+                try {
+                    const stateData = exportState();
+                    pushStateToServer(stateData);
+                } catch (e) {
+                    recordScriptError('controller.pushTimer', e);
+                }
+            }, state.currentPushInterval);
+
+            try {
+                detectPageState();
+                const initialState = exportState();
+                pushStateToServer(initialState);
+            } catch (e) {
+                recordScriptError('controller.initialState', e);
+            }
+        }
+
+        function stop() {
+            if (state.updateTimer) {
+                clearInterval(state.updateTimer);
+                state.updateTimer = null;
+                log('状态检测已停止');
+            }
+            if (state.pushTimer) {
+                clearInterval(state.pushTimer);
+                state.pushTimer = null;
+                log('推送循环已停止');
+            }
+        }
+
+        function getState() {
+            return {
+                isOperating: state.isOperating,
+                isQueuing: state.isQueuing,
+                isStandby: state.isStandby,
+                totalOperations: state.totalOperations,
+                anomalyCount: state.anomalyCount,
+                consecutiveAnomalies: state.consecutiveAnomalies,  // 🆕
+                anomalyCooldownUntil: state.anomalyCooldownUntil,  // 🆕 冷却期结束时间
+                sessionDuration: state.sessionStartTime > 0
+                    ? Math.floor((Date.now() - state.sessionStartTime) / 1000)
+                    : 0,
+                rank: state.lastRank,
+                performanceMode: state.isInStandbyMode ? 'high_rank_standby' : 'normal',
+                loopHeartbeatAt: state.loopHeartbeatAt,
+                lastScriptError: state.lastScriptError,
+                pushStatus: state.lastPushSuccess ? '✅ 正常' : '❌ 失败',
+                pushRetries: state.pushRetries
+            };
+        }
+
+        function getPerformanceInfo() {
+            return {
+                mode: state.isInStandbyMode ? '🔋 静候模式（省电）' : '⚡ 正常模式',
+                isInStandbyMode: state.isInStandbyMode,
+                updateInterval: state.currentUpdateInterval + 'ms',
+                pushInterval: state.currentPushInterval + 'ms',
+                resourceSaving: state.isInStandbyMode ? '~80%' : '0%',
+                currentRank: state.lastRank,
+                standbyThreshold: CONFIG.standbyRankThreshold
+            };
+        }
+
+        function resetStats() {
+            state.totalOperations = 0;
+            state.anomalyCount = 0;
+            state.consecutiveAnomalies = 0;  // 🆕
+            state.anomalyCooldownUntil = 0;   // 🆕 重置冷却期
+            log('统计数据已重置（包括冷却期）');
+        }
+
+        function testConnection() {
+            log('测试中转站连接...');
+
+            const testData = {
+                test: true,
+                timestamp: Date.now()
+            };
+
+            pushStateToServer(testData).then(() => {
+                if (state.lastPushSuccess) {
+                    log('✅ 连接成功！中转站正常工作');
+                    console.log('%c✅ Bridge 连接成功', 'color: #00ff00; font-weight: bold');
+                } else {
+                    log('❌ 连接失败，请检查 Bridge.py 是否运行');
+                    console.log('%c❌ Bridge 连接失败', 'color: #ff0000; font-weight: bold');
+                }
+            });
+        }
+
+        return {
+            config: CONFIG,
+            start,
+            stop,
+            getState,
+            detectPageState,
+            resetStats,
+            exportState,
+            testConnection,
+            getPerformanceInfo,
+            handleConsecutiveAnomalies,  // 🆕 导出手动触发函数
+            queueEventLog  // 🆕 导出事件日志函数（供外部调用）
+        };
+    })();
+
+    // ============================================================
+    // 暴露到全局作用域
+    // ============================================================
+    window.PrismaXNotifier = PrismaXNotifier;
+    window.PrismaXController = PrismaXController;
+
+    // ============================================================
+    // 初始化提示
+    // ============================================================
+    console.log('╔════════════════════════════════════════════╗');
+    console.log('║   PRISMAX 跨端联动系统 v2.5.2 已加载      ║');
+    console.log('╠════════════════════════════════════════════╣');
+    console.log('║   ✅ 通知系统已就绪                        ║');
+    console.log('║   ✅ 状态控制器已就绪                      ║');
+    console.log('║   ✅ HTTP Bridge 已启用                     ║');
+    console.log('║   ✅ 性能优化已启用（静候模式降频）        ║');
+    console.log('║   🆕 连续异常自动退出 (阈值:2次)          ║');
+    console.log('║   🔒 异常退出冷却期 (5分钟)               ║');
+    console.log('║                                            ║');
+    console.log('║   📡 中转站: http://127.0.0.1:5000        ║');
+    console.log('║   ⏱️  推送间隔: 0.5秒（正常）/ 3秒（静候）║');
+    console.log('║   🔋 静候阈值: 排名 > 50                  ║');
+    console.log('║                                            ║');
+    console.log('║   🧪 测试通知: PrismaXNotifier.sendTest()  ║');
+    console.log('║   🧪 测试连接: PrismaXController.testConnection() ║');
+    console.log('║   📊 查看状态: PrismaXController.getState() ║');
+    console.log('║   ⚡ 性能信息: PrismaXController.getPerformanceInfo() ║');
+    console.log('╚════════════════════════════════════════════╝');
+
+    // ============================================================
+    // 自动启动状态控制器
+    // ============================================================
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(() => {
+                try {
+                    PrismaXController.start();
+                } catch (e) {
+                    recordScriptError('controller.start', e);
+                }
+            }, 1000);
+        });
+    } else {
+        setTimeout(() => {
+            try {
+                PrismaXController.start();
+            } catch (e) {
+                recordScriptError('controller.start', e);
+            }
+        }, 1000);
+    }
+
+    // ============================================================
+    // 原有 UI 和逻辑代码
+    // ============================================================
+    const CONFIG = mergeConfig({
+        stuckToleranceMin: 300,
+        stuckToleranceMax: 360,
+        safeZoneRawLimit: 4,
+        highRankStandbyThreshold: 100,
+        highRankLoopInterval: 3000,
+        highRankDomScanInterval: 7000,
+        rankDropTolerance: 3,
+        timerFreezeTimeout: 45 * 1000,
+        clickDelayMin: 1000,
+        clickDelayMax: 3000,
+        minSessionTime: 40 * 1000,
+        fallbackReloadTimeout: 5 * 60 * 1000,
+        maxQueueTimeMin: 170,
+        requeueDelayMs: 2 * 1000,
+
+        morningEnabled: true,
+        morningWindowStart: "08:01",
+        morningWindowEnd:   "08:06",
+        morningRandomInsideWindow: true,
+        morningIgnoreDone: false,
+
+        morningWatchdogEnabled: true,
+        morningWatchdogTimeout: 15 * 1000,
+        morningWatchdogCheckInterval: 1000,
+
+        armSwitchTask: {
+            enabled: true,
+            successThreshold: 6,
+            robotAvatarXPath: '/html/body/div[1]/div/div[2]/div/div[2]/ul/li[3]',
+            trainingGoldArmXPath: '/html/body/div[1]/div/div[3]/div[2]/div/div/div[2]/div[2]',
+            arenaArmXPath: '/html/body/div[1]/div/div[3]/div[2]/div/div/div[2]/div[3]',
+            morningReturnToGold: true,
+            afterLeaveDelay: 1200,
+            afterAvatarDelay: 1200,
+            afterArenaDelay: 1500
+        },
+
+        // 🆕 评论任务配置
+        commentTask: {
+            enabled: true,
+            windowStart: "00:00",
+            windowEnd: "00:05",
+            randomInsideWindow: true,
+            commentCount: { min: 5, max: 5 },  // 固定5次
+            commentDelay: { min: 5000, max: 8000 },  // 5-8秒间隔
+            retryCount: 3,
+            retryDelay: 2000,
+            comments: [
+                "PrismaX demonstrates an exceptional integration of Web3 automation, intelligent execution logic, and user-centric design, making it one of the most forward-looking and practically useful AI agents in the decentralized ecosystem today.",
+                "What truly sets PrismaX apart is not only its technical robustness, but also its ability to translate complex on-chain operations into reliable, scalable, and fully autonomous decision-making workflows.",
+                "PrismaX is redefining how users interact with decentralized systems by combining strategic intelligence, execution efficiency, and a remarkably intuitive automation framework into a single coherent product.",
+                "In an ecosystem full of experimental tools, PrismaX stands out as a production-grade, mission-critical AI agent infrastructure that can genuinely support long-term, large-scale Web3 operations.",
+                "The architectural design of PrismaX reflects a deep understanding of both blockchain mechanics and real-world automation needs, resulting in a system that is powerful, flexible, and surprisingly easy to deploy.",
+                "By bridging intelligent agents with decentralized finance and on-chain execution, PrismaX is not merely a tool, but a foundational layer for the next generation of autonomous Web3 applications."
+            ]
+        },
+
+        text: {
+            enter: ["Enter Live Control", "Join Queue", "Enter Pool"],
+            end: ["End Tele-Operation", "End Session"],
+            queuing: ["Leave", "Waiting", "Position", "Queued"],
+            liveChat: ["Live Chat", "Open Live Chat"],
+            queue: ["Queue"],
+            blacklist: ["Discord", "Twitter", "Telegram", "Docs", "Whitepaper", "Log", "Sign"]
+        }
+    }, USER_CONFIG.main || {});
+
+    const STORAGE_KEYS = {
+        COUNT: 'p_count',
+        DATE: 'p_date',
+        MORNING_TARGET: 'p_morning_target_ts',
+        ANOMALY_COUNT: 'p_anomaly_count',
+        CONSECUTIVE_ANOMALIES: 'p_consecutive_anomalies',
+        ANOMALY_COOLDOWN: 'p_anomaly_cooldown',
+        // 🆕 评论任务存储键
+        COMMENT_TASK_DONE: 'p_comment_task_done',
+        COMMENT_TASK_TARGET: 'p_comment_target_ts',
+        COMMENT_IN_PROGRESS: 'p_comment_in_progress',
+        ARM_SWITCH_DONE: 'p_arm_switch_done',
+        ARM_SWITCH_IN_PROGRESS: 'p_arm_switch_in_progress',
+        COMMENT_TASK_START_TIME: 'p_comment_start_time'  // 🆕 记录任务开始时间（用于超时检测）
+    };
+    const MORNING_DONE_KEY = 'p_morning_done';
+    const MORNING_PRERELOAD_KEY = 'p_morning_prereload';
+    const PANEL_POS_X_KEY = 'p_panel_x';
+    const PANEL_POS_Y_KEY = 'p_panel_y';
+    const PANEL_COLLAPSED_KEY = 'p_panel_collapsed';
+
+    function getTodayStr() {
+        return new Date().toDateString();
+    }
+
+    const START_DAY = getTodayStr();
+    let scriptPaused = false;
+    let morningLock = false;
+
+    let watchdogLastHeartbeat = Date.now();
+    let watchdogTimer = null;
+    let inMorningWindow = false;
+
+    const Storage = {
+        get() {
+            const currentToday = getTodayStr();
+            const storedDate = localStorage.getItem(STORAGE_KEYS.DATE);
+            if (storedDate !== currentToday) return 0;
+            return parseInt(localStorage.getItem(STORAGE_KEYS.COUNT) || '0', 10);
+        },
+        add() {
+            const current = this.get();
+            this.setCount(current + 1);
+        },
+        setCount(v) {
+            localStorage.setItem(STORAGE_KEYS.DATE, getTodayStr());
+            localStorage.setItem(STORAGE_KEYS.COUNT, String(v));
+        },
+        reset() {
+            if (confirm("贾维斯：确认要重置今日计数协议吗？")) {
+                this.setCount(0);
+                this.resetAnomaly();
+                localStorage.removeItem(MORNING_DONE_KEY);
+                localStorage.removeItem(STORAGE_KEYS.MORNING_TARGET);
+                location.reload();
+            }
+        },
+        getMorningTarget() {
+            const storedDate = localStorage.getItem(STORAGE_KEYS.DATE);
+            if (storedDate !== getTodayStr()) return 0;
+            return parseInt(localStorage.getItem(STORAGE_KEYS.MORNING_TARGET) || '0', 10);
+        },
+        setMorningTarget(ts) {
+            localStorage.setItem(STORAGE_KEYS.DATE, getTodayStr());
+            localStorage.setItem(STORAGE_KEYS.MORNING_TARGET, String(ts));
+        },
+        getAnomalyCount() {
+            const currentToday = getTodayStr();
+            const storedDate = localStorage.getItem(STORAGE_KEYS.DATE);
+            if (storedDate !== currentToday) return 0;
+            return parseInt(localStorage.getItem(STORAGE_KEYS.ANOMALY_COUNT) || '0', 10);
+        },
+        addAnomaly() {
+            const current = this.getAnomalyCount();
+            localStorage.setItem(STORAGE_KEYS.DATE, getTodayStr());
+            localStorage.setItem(STORAGE_KEYS.ANOMALY_COUNT, String(current + 1));
+        },
+        resetAnomaly() {
+            localStorage.setItem(STORAGE_KEYS.ANOMALY_COUNT, '0');
+        },
+        // 🆕 评论任务存储方法
+        getCommentTarget() {
+            const storedDate = localStorage.getItem(STORAGE_KEYS.DATE);
+            if (storedDate !== getTodayStr()) return 0;
+            return parseInt(localStorage.getItem(STORAGE_KEYS.COMMENT_TASK_TARGET) || '0', 10);
+        },
+        setCommentTarget(ts) {
+            localStorage.setItem(STORAGE_KEYS.DATE, getTodayStr());
+            localStorage.setItem(STORAGE_KEYS.COMMENT_TASK_TARGET, String(ts));
+        },
+        isCommentTaskDone() {
+            return localStorage.getItem(STORAGE_KEYS.COMMENT_TASK_DONE) === getTodayStr();
+        },
+        markCommentTaskDone() {
+            localStorage.setItem(STORAGE_KEYS.COMMENT_TASK_DONE, getTodayStr());
+        },
+        isCommentInProgress() {
+            return localStorage.getItem(STORAGE_KEYS.COMMENT_IN_PROGRESS) === 'true';
+        },
+        setCommentInProgress(v) {
+            localStorage.setItem(STORAGE_KEYS.COMMENT_IN_PROGRESS, v ? 'true' : 'false');
+            // 🆕 同时记录/清除开始时间
+            if (v) {
+                localStorage.setItem(STORAGE_KEYS.COMMENT_TASK_START_TIME, String(Date.now()));
+            } else {
+                localStorage.removeItem(STORAGE_KEYS.COMMENT_TASK_START_TIME);
+            }
+        },
+        // 🆕 获取评论任务开始时间
+        getCommentTaskStartTime() {
+            const ts = localStorage.getItem(STORAGE_KEYS.COMMENT_TASK_START_TIME);
+            return ts ? parseInt(ts, 10) : 0;
+        },
+        // 🆕 检查评论任务是否超时（默认5分钟）
+        isCommentTaskTimeout(timeoutMs = 5 * 60 * 1000) {
+            if (!this.isCommentInProgress()) return false;
+            const startTime = this.getCommentTaskStartTime();
+            if (!startTime) return true;  // 没有开始时间但标记为进行中，视为异常
+            return (Date.now() - startTime) > timeoutMs;
+        },
+        // 🆕 强制重置评论任务状态（用于超时恢复）
+        resetCommentTaskState() {
+            console.log('[评论任务] 🔄 强制重置任务状态');
+            localStorage.removeItem(STORAGE_KEYS.COMMENT_IN_PROGRESS);
+            localStorage.removeItem(STORAGE_KEYS.COMMENT_TASK_START_TIME);
+        },
+        isArmSwitchDone() {
+            return localStorage.getItem(STORAGE_KEYS.ARM_SWITCH_DONE) === getTodayStr();
+        },
+        markArmSwitchDone() {
+            localStorage.setItem(STORAGE_KEYS.ARM_SWITCH_DONE, getTodayStr());
+            localStorage.removeItem(STORAGE_KEYS.ARM_SWITCH_IN_PROGRESS);
+        },
+        isArmSwitchInProgress() {
+            return localStorage.getItem(STORAGE_KEYS.ARM_SWITCH_IN_PROGRESS) === getTodayStr();
+        },
+        setArmSwitchInProgress(v) {
+            if (v) {
+                localStorage.setItem(STORAGE_KEYS.ARM_SWITCH_IN_PROGRESS, getTodayStr());
+            } else {
+                localStorage.removeItem(STORAGE_KEYS.ARM_SWITCH_IN_PROGRESS);
+            }
+        }
+    };
+
+    function getRandomInt(min, max) {
+        return Math.floor(Math.random() * (max - min + 1)) + min;
+    }
+
+    function formatDurationMs(ms) {
+        const total = Math.max(0, Math.floor(ms / 1000));
+        const h = Math.floor(total / 3600);
+        const m = Math.floor((total % 3600) / 60);
+        const s = total % 60;
+        if (h > 0) return `${h}h ${m}m ${s}s`;
+        return `${m}m ${s}s`;
+    }
+
+    function randomStuckLimitMs() {
+        return getRandomInt(CONFIG.stuckToleranceMin, CONFIG.stuckToleranceMax) * 1000;
+    }
+
+    function safeReload(reason) {
+        console.log(`[Stark HUD] 系统刷新执行: ${reason}`);
+        PrismaXNotifier.notifyError(reason);
+        setTimeout(() => {
+            location.reload();
+        }, 500);
+    }
+
+    function updateWatchdogHeartbeat() {
+        watchdogLastHeartbeat = Date.now();
+    }
+
+    function startMorningWatchdog() {
+        if (!CONFIG.morningWatchdogEnabled) return;
+        if (watchdogTimer) return;
+
+        console.log("[Stark HUD] 早八看门狗已启动");
+        watchdogTimer = setInterval(() => {
+            if (!inMorningWindow) return;
+
+            const now = Date.now();
+            const timeSinceHeartbeat = now - watchdogLastHeartbeat;
+
+            if (timeSinceHeartbeat > CONFIG.morningWatchdogTimeout) {
+                console.log(`[Stark HUD] 看门狗触发：${timeSinceHeartbeat}ms 无心跳，强制刷新！`);
+                safeReload("早八看门狗：页面假死检测");
+            }
+        }, CONFIG.morningWatchdogCheckInterval);
+    }
+
+    function stopMorningWatchdog() {
+        if (watchdogTimer) {
+            clearInterval(watchdogTimer);
+            watchdogTimer = null;
+            console.log("[Stark HUD] 早八看门狗已停止");
+        }
+    }
+
+    function injectStyles() {
+        const css = `
+            @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;700&display=swap');
+            #stark-panel {
+                position: fixed; bottom: 30px; right: 30px; width: 320px;
+                background: rgba(10, 20, 35, 0.95);
+                clip-path: polygon(15px 0, 100% 0, 100% calc(100% - 15px), calc(100% - 15px) 100%, 0 100%, 0 15px);
+                border: 2px solid rgba(0, 243, 255, 0.5);
+                box-shadow: 0 0 15px rgba(0, 243, 255, 0.3), inset 0 0 20px rgba(0, 243, 255, 0.1);
+                color: #00f3ff; font-family: 'Rajdhani', 'Arial', sans-serif;
+                z-index: 999999; padding: 12px 14px;
+                backdrop-filter: blur(8px); transition: all 0.3s ease;
+            }
+            #stark-panel:hover {
+                box-shadow: 0 0 25px rgba(0, 243, 255, 0.5), inset 0 0 30px rgba(0, 243, 255, 0.2);
+                border-color: rgba(0, 243, 255, 0.8);
+            }
+            .st-header {
+                display: flex; justify-content: space-between; align-items: center;
+                margin-bottom: 10px; padding-bottom: 8px;
+                border-bottom: 1px solid rgba(0, 243, 255, 0.3); cursor: move;
+            }
+            .st-title {
+                font-weight: 700; font-size: 13px; letter-spacing: 1.2px;
+                text-transform: uppercase; text-shadow: 0 0 8px rgba(0, 243, 255, 0.8);
+            }
+            .st-header-right { display: flex; align-items: center; gap: 8px; }
+            .st-arc-reactor {
+                width: 14px; height: 14px; background: #00f3ff; border-radius: 50%;
+                box-shadow: 0 0 10px #00f3ff, 0 0 20px #00f3ff, inset 0 0 5px #fff;
+                animation: reactor-pulse 2s infinite ease-in-out;
+            }
+            @keyframes reactor-pulse {
+                0% { opacity: 0.6; box-shadow: 0 0 5px #00f3ff; }
+                50% { opacity: 1; box-shadow: 0 0 15px #00f3ff, 0 0 25px #00f3ff; }
+                100% { opacity: 0.6; box-shadow: 0 0 5px #00f3ff; }
+            }
+            .st-collapse-btn {
+                font-size: 10px; cursor: pointer; padding: 3px 6px;
+                border: 1px solid rgba(0, 243, 255, 0.4);
+                border-radius: 2px; text-transform: uppercase;
+                transition: all 0.2s;
+            }
+            .st-collapse-btn:hover {
+                background: rgba(0, 243, 255, 0.1);
+                border-color: rgba(0, 243, 255, 0.6);
+            }
+            .st-status-box {
+                background: rgba(0, 243, 255, 0.08);
+                border: 1px solid rgba(0, 243, 255, 0.4);
+                border-radius: 4px;
+                padding: 8px 12px; margin-bottom: 10px;
+                font-size: 13px; font-weight: 600;
+                text-shadow: 0 0 5px currentColor;
+                text-align: center;
+                transition: all 0.3s;
+            }
+            .st-data-section {
+                background: rgba(0, 0, 0, 0.2);
+                border-radius: 4px;
+                padding: 8px 10px;
+                margin-bottom: 8px;
+            }
+            .st-row {
+                display: flex; justify-content: space-between;
+                margin-bottom: 6px; font-size: 12px; align-items: center;
+                padding: 2px 0;
+            }
+            .st-row:last-child {
+                margin-bottom: 0;
+            }
+            .st-label {
+                color: rgba(255, 255, 255, 0.65);
+                font-size: 11px;
+                text-transform: uppercase;
+                letter-spacing: 0.8px;
+                font-weight: 500;
+            }
+            .st-value {
+                font-weight: 700;
+                font-size: 13px;
+                text-align: right;
+            }
+            .st-val-cyan { color: #00f3ff; text-shadow: 0 0 8px rgba(0, 243, 255, 0.6); }
+            .st-val-gold { color: #ffd700; text-shadow: 0 0 8px rgba(255, 215, 0, 0.6); }
+            .st-val-gray { color: #8899aa; }
+            .st-val-orange { color: #ff9966; text-shadow: 0 0 8px rgba(255, 153, 102, 0.6); }
+            .st-morning-info {
+                font-size: 11px;
+                color: #00f3ff;
+                margin-top: 6px;
+                padding: 6px 8px;
+                background: rgba(0, 243, 255, 0.05);
+                border-left: 3px solid rgba(0, 243, 255, 0.5);
+                border-radius: 2px;
+                letter-spacing: 0.5px;
+                line-height: 1.4;
+            }
+            .st-footer {
+                margin-top: 8px; padding-top: 8px;
+                border-top: 1px solid rgba(255, 215, 0, 0.2);
+                font-size: 11px;
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+            }
+            .st-footer-row {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+            .st-count-display {
+                color: rgba(255, 255, 255, 0.7);
+                font-size: 11px;
+            }
+            .st-count-display b {
+                color: #fff;
+                text-shadow: 0 0 5px #fff;
+                font-size: 14px;
+                margin: 0 3px;
+            }
+            .st-button-group {
+                display: flex;
+                gap: 6px;
+            }
+            #st-reset, #st-toggle {
+                cursor: pointer;
+                padding: 4px 8px;
+                border: 1px solid rgba(255, 215, 0, 0.3);
+                border-radius: 3px;
+                transition: all 0.2s;
+                text-transform: uppercase;
+                font-size: 10px;
+                background: rgba(0, 0, 0, 0.2);
+            }
+            #st-reset:hover, #st-toggle:hover {
+                background: rgba(255, 215, 0, 0.2);
+                box-shadow: 0 0 10px rgba(255, 215, 0, 0.5);
+                color: #fff;
+                border-color: rgba(255, 215, 0, 0.6);
+            }
+        `;
+        const style = document.createElement('style');
+        style.textContent = css;
+        document.head.appendChild(style);
+    }
+
+    function createPanel() {
+        if (document.getElementById('stark-panel')) return;
+        injectStyles();
+
+        const p = document.createElement('div');
+        p.id = 'stark-panel';
+        p.innerHTML = `
+            <div class="st-header" id="st-header">
+                <span class="st-title">PRISMAX 无忧助手 V2.5.2</span>
+                <div class="st-header-right">
+                    <span class="st-collapse-btn" id="st-collapse">折叠</span>
+                    <div class="st-arc-reactor" id="st-indicator"></div>
+                </div>
+            </div>
+            <div id="st-body">
+                <div id="st-status" class="st-status-box st-val-cyan">贾维斯系统初始化...</div>
+
+                <div class="st-data-section">
+                    <div class="st-row">
+                        <span class="st-label">自动刷新倒数</span>
+                        <span id="p-timer" class="st-value st-val-cyan">--</span>
+                    </div>
+                    <div class="st-row">
+                        <span class="st-label">当前排队时长</span>
+                        <span id="p-duration" class="st-value st-val-gold">0m 0s</span>
+                    </div>
+                    <div class="st-row">
+                        <span class="st-label">异常操作次数</span>
+                        <span id="p-anomaly" class="st-value st-val-orange">0 次</span>
+                    </div>
+                    <div class="st-row">
+                        <span class="st-label">评论任务</span>
+                        <span id="p-comment-task" class="st-value st-val-gray">未完成</span>
+                    </div>
+                </div>
+
+                <div id="p-morning-info" class="st-morning-info"></div>
+
+                <div class="st-footer">
+                    <div class="st-footer-row">
+                        <span class="st-count-display">今日战绩: <b id="p-count">0</b> 次有效操作</span>
+                    </div>
+                    <div class="st-footer-row">
+                        <div class="st-button-group">
+                            <span id="st-toggle">暂停脚本</span>
+                            <span id="st-reset">重置协议</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(p);
+
+        const savedX = localStorage.getItem(PANEL_POS_X_KEY);
+        const savedY = localStorage.getItem(PANEL_POS_Y_KEY);
+        if (savedX !== null && savedY !== null) {
+            p.style.left = `${parseInt(savedX, 10)}px`;
+            p.style.top = `${parseInt(savedY, 10)}px`;
+            p.style.right = 'auto'; p.style.bottom = 'auto';
+        }
+
+        const collapsed = localStorage.getItem(PANEL_COLLAPSED_KEY) === '1';
+        const body = document.getElementById('st-body');
+        const collapseBtn = document.getElementById('st-collapse');
+        if (collapsed && body && collapseBtn) {
+            body.style.display = 'none';
+            collapseBtn.textContent = '展开';
+        }
+
+        const resetBtn = document.getElementById('st-reset');
+        if (resetBtn) resetBtn.onclick = () => Storage.reset();
+        const toggleBtn = document.getElementById('st-toggle');
+        if (toggleBtn) {
+            toggleBtn.onclick = () => {
+                scriptPaused = !scriptPaused;
+                toggleBtn.textContent = scriptPaused ? "恢复脚本" : "暂停脚本";
+            };
+        }
+        if (collapseBtn) {
+            collapseBtn.onclick = (e) => {
+                e.stopPropagation();
+                if (!body) return;
+                const isHidden = body.style.display === 'none';
+                body.style.display = isHidden ? '' : 'none';
+                collapseBtn.textContent = isHidden ? '折叠' : '展开';
+                localStorage.setItem(PANEL_COLLAPSED_KEY, isHidden ? '0' : '1');
+            };
+        }
+
+        const header = document.getElementById('st-header');
+        if (header) {
+            let isDragging = false, offsetX = 0, offsetY = 0;
+            header.addEventListener('mousedown', (e) => {
+                if (e.target.id === 'st-collapse') return;
+                isDragging = true;
+                const rect = p.getBoundingClientRect();
+                offsetX = e.clientX - rect.left; offsetY = e.clientY - rect.top;
+                p.style.right = 'auto'; p.style.bottom = 'auto';
+                document.addEventListener('mousemove', onMouseMove);
+                document.addEventListener('mouseup', onMouseUp);
+                e.preventDefault();
+            });
+            function onMouseMove(e) {
+                if (!isDragging) return;
+                let x = e.clientX - offsetX; let y = e.clientY - offsetY;
+                const maxX = window.innerWidth - p.offsetWidth; const maxY = window.innerHeight - p.offsetHeight;
+                if (x < 0) x = 0; if (y < 0) y = 0; if (x > maxX) x = maxX; if (y > maxY) y = maxY;
+                p.style.left = `${x}px`; p.style.top = `${y}px`;
+            }
+            function onMouseUp() {
+                if (!isDragging) return;
+                isDragging = false;
+                document.removeEventListener('mousemove', onMouseMove);
+                document.removeEventListener('mouseup', onMouseUp);
+                const rect = p.getBoundingClientRect();
+                localStorage.setItem(PANEL_POS_X_KEY, String(rect.left));
+                localStorage.setItem(PANEL_POS_Y_KEY, String(rect.top));
+            }
+        }
+    }
+
+    function updateAnomalyUI() {
+        const anomalyEl = document.getElementById('p-anomaly');
+        if (!anomalyEl) return;
+        const count = Storage.getAnomalyCount();
+        anomalyEl.innerText = `${count} 次`;
+        if (count > 0) {
+            anomalyEl.classList.remove('st-val-gray');
+            anomalyEl.classList.add('st-val-orange');
+        } else {
+            anomalyEl.classList.remove('st-val-orange');
+            anomalyEl.classList.add('st-val-gray');
+        }
+    }
+
+    function updateUI(statusText, timerText, durationText, statusColor) {
+        const s = document.getElementById('st-status');
+        const t = document.getElementById('p-timer');
+        const d = document.getElementById('p-duration');
+        const c = document.getElementById('p-count');
+        const indicator = document.getElementById('st-indicator');
+        if (s) {
+            s.innerText = statusText;
+            let themeColor = '#00f3ff'; let shadowColor = 'rgba(0, 243, 255, 0.6)';
+            if (['#00ff00','cyan','#00f3ff','#00ff99'].includes(statusColor)) { themeColor = '#00f3ff'; shadowColor = 'rgba(0, 243, 255, 0.6)'; }
+            else if (['yellow','#ffcc00','#ffaa00'].includes(statusColor)) { themeColor = '#ffd700'; shadowColor = 'rgba(255, 215, 0, 0.6)'; }
+            else if (['#ff6666','#ff3333','magenta'].includes(statusColor)) { themeColor = '#ff3333'; shadowColor = 'rgba(255, 51, 51, 0.6)'; }
+            else if (['orange','#ff9966'].includes(statusColor)) { themeColor = '#ff9966'; shadowColor = 'rgba(255, 153, 102, 0.6)'; }
+            else { themeColor = '#8899aa'; shadowColor = 'rgba(136, 153, 170, 0.3)'; }
+            s.style.color = themeColor; s.style.borderColor = themeColor;
+            s.style.boxShadow = `0 0 10px ${shadowColor}, inset 0 0 5px ${shadowColor}`;
+            if (indicator) { indicator.style.background = themeColor; indicator.style.boxShadow = `0 0 10px ${themeColor}, 0 0 20px ${themeColor}`; }
+        }
+        if (t && typeof timerText === 'string') t.innerText = timerText;
+        if (d && typeof durationText === 'string') d.innerText = durationText;
+        if (c) c.innerText = Storage.get();
+        updateAnomalyUI();
+        updateCommentTaskUI();
+    }
+
+    // 🆕 评论任务 UI 更新
+    function updateCommentTaskUI() {
+        const el = document.getElementById('p-comment-task');
+        if (!el) return;
+
+        if (Storage.isCommentTaskDone()) {
+            el.innerText = '✅ 已完成';
+            el.className = 'st-value st-val-cyan';
+        } else if (Storage.isCommentInProgress()) {
+            el.innerText = '⏳ 进行中...';
+            el.className = 'st-value st-val-gold';
+        } else {
+            const targetTs = Storage.getCommentTarget();
+            if (targetTs && targetTs > Date.now()) {
+                const time = new Date(targetTs).toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'});
+                el.innerText = `🔄 待触发 (${time})`;
+                el.className = 'st-value st-val-gold';
+            } else {
+                el.innerText = '未完成';
+                el.className = 'st-value st-val-gray';
+            }
+        }
+    }
+
+    // 🆕 评论任务时间窗口解析
+    function getCommentWindowMs() {
+        if (!CONFIG.commentTask.enabled) return null;
+        const start = parseTimeToday(CONFIG.commentTask.windowStart);
+        const end = parseTimeToday(CONFIG.commentTask.windowEnd);
+        if (!start || !end) return null;
+        const startMs = start.getTime();
+        const endMs = end.getTime();
+        if (!(endMs > startMs)) return null;
+        return { startMs, endMs };
+    }
+
+    // 🆕 查找标签按钮（Live Chat / Queue / Open Live Chat）
+    function findTabBtn(keywords) {
+        // 尝试多种选择器
+        const selectors = [
+            'button',
+            'div[role="button"]',
+            'span',
+            'div',
+            'a',
+            '[class*="tab"]',
+            '[class*="chat"]',
+            '[class*="button"]'
+        ];
+        
+        const allElements = document.querySelectorAll(selectors.join(', '));
+        const candidates = Array.from(allElements);
+        
+        console.log(`[评论任务] 搜索按钮，关键词: ${keywords.join(', ')}，候选元素数: ${candidates.length}`);
+        
+        const found = candidates.find(el => {
+            if (!el.offsetParent && el.style.display !== 'none') return false;
+            const txt = (el.innerText || el.textContent || '').trim();
+            if (!txt) return false;
+            
+            const matches = keywords.some(k => {
+                // 精确匹配或包含匹配
+                return txt.toLowerCase() === k.toLowerCase() || 
+                       txt.toLowerCase().includes(k.toLowerCase());
+            });
+            
+            if (matches) {
+                console.log(`[评论任务] 找到匹配按钮: "${txt}"`, el);
+            }
+            return matches;
+        });
+        
+        if (!found) {
+            console.log('[评论任务] ⚠️ 未找到匹配按钮，列出所有可能的元素:');
+            candidates.slice(0, 20).forEach((el, i) => {
+                const txt = (el.innerText || '').trim().substring(0, 30);
+                if (txt) console.log(`   ${i}: "${txt}"`);
+            });
+        }
+        
+        return found;
+    }
+
+    // 🆕 发送单条评论
+    async function sendOneComment(comment, retryCount = 0) {
+        const maxRetries = CONFIG.commentTask.retryCount;
+        const retryDelay = CONFIG.commentTask.retryDelay;
+
+        try {
+            // 🆕 检查界面是否收起来了，如果收起来就重新展开
+            let openLiveChatBtn = document.querySelector('button[class*="TeleOpRightPanel_openBtnDesktop"]');
+            if (!openLiveChatBtn) {
+                openLiveChatBtn = Array.from(document.querySelectorAll('button, div, span'))
+                    .find(el => (el.innerText || '').trim().includes('Open Live Chat'));
+            }
+            if (openLiveChatBtn) {
+                console.log('[评论任务] 检测到界面已收起，重新展开...');
+                openLiveChatBtn.click();
+                await new Promise(r => setTimeout(r, 1500));
+            }
+            
+            // 查找输入框（匹配 "Send message to the chat..."）
+            let input = document.querySelector('input[placeholder*="Send" i], input[placeholder*="chat" i], input[placeholder*="message" i]');
+            if (!input) {
+                input = document.querySelector('textarea[placeholder*="Send" i], textarea[placeholder*="chat" i]');
+            }
+            if (!input) {
+                // 使用实际页面的类名
+                input = document.querySelector('input[class*="LiveChatModule"], input[class*="messageInput"]');
+            }
+            if (!input) {
+                // 尝试更宽泛的选择器
+                const allInputs = document.querySelectorAll('input, textarea');
+                input = Array.from(allInputs).find(el => {
+                    const ph = (el.placeholder || '').toLowerCase();
+                    return ph.includes('send') || ph.includes('chat') || ph.includes('message');
+                });
+            }
+            
+            console.log('[评论任务] 输入框搜索结果:', input);
+            
+            if (!input) {
+                console.error('[评论任务] ❌ 未找到输入框');
+                if (retryCount < maxRetries) {
+                    console.log(`[评论任务] 重试 ${retryCount + 1}/${maxRetries}...`);
+                    await new Promise(r => setTimeout(r, retryDelay));
+                    return sendOneComment(comment, retryCount + 1);
+                }
+                return false;
+            }
+
+            // 输入评论（React 兼容方式）
+            input.focus();
+            
+            // 🆕 使用 React 兼容的方式设置值
+            // 获取原生的 value setter
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            nativeInputValueSetter.call(input, comment);
+            
+            // 触发 React 的 onChange 事件
+            const inputEvent = new Event('input', { bubbles: true });
+            input.dispatchEvent(inputEvent);
+            
+            console.log(`[评论任务] 📝 已输入内容: "${comment.substring(0, 30)}..."`);
+
+            // 等待输入完成（2秒）
+            await new Promise(r => setTimeout(r, 2000));
+
+            // 🆕 点击发送按钮
+            console.log(`[评论任务] 🖱️ 查找并点击发送按钮...`);
+            
+            // 查找发送按钮（尝试多种选择器）
+            let sendBtn = document.querySelector('button[class*="LiveChatModule_sendButton"]');
+            if (!sendBtn) {
+                sendBtn = document.querySelector('button[type="submit"]');
+            }
+            if (!sendBtn) {
+                // 查找输入框旁边的按钮
+                const inputParent = input.closest('div, form');
+                if (inputParent) {
+                    sendBtn = inputParent.querySelector('button');
+                }
+            }
+            if (!sendBtn) {
+                // 查找包含 send 图标的按钮
+                const allBtns = document.querySelectorAll('button');
+                sendBtn = Array.from(allBtns).find(btn => {
+                    const svg = btn.querySelector('svg');
+                    return svg && btn.offsetParent;
+                });
+            }
+            
+            console.log(`[评论任务] 发送按钮:`, sendBtn);
+            
+            if (sendBtn) {
+                // 确保按钮获得焦点后再点击
+                sendBtn.focus();
+                await new Promise(r => setTimeout(r, 100));
+                sendBtn.click();
+                console.log(`[评论任务] ✅ 已点击发送按钮`);
+            } else {
+                // 备用：尝试 Enter 键
+                console.log(`[评论任务] ⚠️ 未找到发送按钮，尝试 Enter 键...`);
+                input.dispatchEvent(new KeyboardEvent('keydown', { 
+                    key: 'Enter', keyCode: 13, bubbles: true 
+                }));
+            }
+            
+            // 等待消息发送完成（2秒）
+            await new Promise(r => setTimeout(r, 2000));
+            
+            console.log(`[评论任务] ✅ 已发送: "${comment.substring(0, 30)}..."`);
+            return true;
+        } catch (e) {
+            console.error('[评论任务] 发送错误:', e);
+            if (retryCount < maxRetries) {
+                console.log(`[评论任务] 重试 ${retryCount + 1}/${maxRetries}...`);
+                await new Promise(r => setTimeout(r, retryDelay));
+                return sendOneComment(comment, retryCount + 1);
+            }
+            return false;
+        }
+    }
+
+    // 🆕 重置评论任务状态（用于测试/手动重置）
+    function resetCommentTask() {
+        localStorage.removeItem(STORAGE_KEYS.COMMENT_TASK_DONE);
+        localStorage.removeItem(STORAGE_KEYS.COMMENT_TASK_TARGET);
+        Storage.resetCommentTaskState();  // 使用新的重置方法（同时清理开始时间）
+        console.log('[评论任务] ✅ 已重置评论任务状态（包括超时相关）');
+        updateCommentTaskUI();
+    }
+
+    // 🆕 执行评论任务主函数（增强版：超时保护 + 完善错误处理）
+    async function performCommentTask() {
+        console.log('[评论任务] 检查状态:', {
+            isDone: Storage.isCommentTaskDone(),
+            inProgress: Storage.isCommentInProgress(),
+            startTime: Storage.getCommentTaskStartTime()
+        });
+        
+        if (Storage.isCommentTaskDone()) {
+            console.log('[评论任务] ⚠️ 今日任务已完成，跳过');
+            return;
+        }
+        
+        if (Storage.isCommentInProgress()) {
+            // 🆕 检查是否超时（5分钟）
+            if (Storage.isCommentTaskTimeout()) {
+                console.log('[评论任务] ⚠️ 检测到任务超时，自动重置状态');
+                Storage.resetCommentTaskState();
+                // 重置后继续执行
+            } else {
+                console.log('[评论任务] ⚠️ 任务正在进行中，跳过');
+                return;
+            }
+        }
+
+        console.log('[评论任务] === 开始执行评论任务 ===');
+        console.log('[评论任务] 开始时间:', new Date().toLocaleString());
+        Storage.setCommentInProgress(true);  // 同时会记录开始时间
+        updateCommentTaskUI();
+
+        // 🆕 使用 finally 确保状态一定会被重置
+        let taskSuccess = false;
+        let successCount = 0;
+        
+        try {
+            // Step 1: 点击 Live Chat 标签（使用多种方法尝试）
+            let liveChatBtn = null;
+            
+            // 方法0: 使用实际的 CSS 类名选择器（最可靠）
+            try {
+                const tabButtons = document.querySelectorAll('button[class*="TeleOpRightPanel_tab"]');
+                liveChatBtn = Array.from(tabButtons).find(el => (el.innerText || '').trim() === 'Live Chat');
+                console.log('[评论任务] 方法0 (CSS类名) 结果:', liveChatBtn ? '找到' : '未找到');
+            } catch (e) {
+                console.log('[评论任务] 方法0 出错:', e.message);
+            }
+            
+            // 方法1: 精确匹配 "Live Chat" 文字
+            if (!liveChatBtn) {
+                try {
+                    const allElements = Array.from(document.querySelectorAll('button, span, div'));
+                    liveChatBtn = allElements.find(el => {
+                        const txt = (el.innerText || el.textContent || '').trim();
+                        return txt === 'Live Chat';
+                    });
+                    console.log('[评论任务] 方法1 (精确匹配) 结果:', liveChatBtn ? '找到' : '未找到');
+                } catch (e) {
+                    console.log('[评论任务] 方法1 出错:', e.message);
+                }
+            }
+            
+            // 方法2: 查找 Queue 旁边的元素
+            if (!liveChatBtn) {
+                try {
+                    const queueEl = Array.from(document.querySelectorAll('button')).find(el => (el.innerText || '').trim() === 'Queue');
+                    if (queueEl && queueEl.parentElement) {
+                        const siblings = Array.from(queueEl.parentElement.children);
+                        liveChatBtn = siblings.find(el => (el.innerText || '').trim().includes('Live Chat'));
+                        console.log('[评论任务] 方法2 (Queue旁边) 结果:', liveChatBtn ? '找到' : '未找到');
+                    }
+                } catch (e) {
+                    console.log('[评论任务] 方法2 出错:', e.message);
+                }
+            }
+            
+            // 方法3: 使用 findTabBtn
+            if (!liveChatBtn) {
+                try {
+                    liveChatBtn = findTabBtn(CONFIG.text.liveChat);
+                    console.log('[评论任务] 方法3 (findTabBtn) 结果:', liveChatBtn ? '找到' : '未找到');
+                } catch (e) {
+                    console.log('[评论任务] 方法3 出错:', e.message);
+                }
+            }
+            
+            console.log('[评论任务] Live Chat 按钮最终结果:', liveChatBtn ? '✅ 找到' : '❌ 未找到');
+            
+            if (!liveChatBtn) {
+                console.error('[评论任务] ❌ 未找到 Live Chat 按钮，任务终止');
+                return;  // finally 会处理状态重置
+            }
+            
+            liveChatBtn.click();
+            console.log('[评论任务] ✅ 已点击 Live Chat');
+
+            // 等待界面加载
+            await new Promise(r => setTimeout(r, 2000));
+
+            // Step 2: 发送评论
+            const commentCount = getRandomInt(CONFIG.commentTask.commentCount.min, CONFIG.commentTask.commentCount.max);
+            const comments = CONFIG.commentTask.comments;
+            const usedIndices = [];
+
+            for (let i = 0; i < commentCount; i++) {
+                try {
+                    // 随机选择一条未使用的评论
+                    let idx;
+                    do {
+                        idx = getRandomInt(0, comments.length - 1);
+                    } while (usedIndices.includes(idx) && usedIndices.length < comments.length);
+                    usedIndices.push(idx);
+
+                    const comment = comments[idx];
+                    const success = await sendOneComment(comment);
+                    if (success) successCount++;
+                    
+                    console.log(`[评论任务] 进度: ${i + 1}/${commentCount}，成功: ${successCount}`);
+
+                    // 评论间隔
+                    if (i < commentCount - 1) {
+                        const delay = getRandomInt(CONFIG.commentTask.commentDelay.min, CONFIG.commentTask.commentDelay.max);
+                        console.log(`[评论任务] 等待 ${delay}ms 后发送下一条...`);
+                        await new Promise(r => setTimeout(r, delay));
+                    }
+                } catch (commentError) {
+                    console.error(`[评论任务] 第 ${i + 1} 条评论发送失败:`, commentError.message);
+                    // 继续尝试下一条
+                }
+            }
+
+            console.log(`[评论任务] ✅ 已发送 ${successCount}/${commentCount} 条评论`);
+
+            // Step 3: 返回 Queue（使用同样的方法）
+            await new Promise(r => setTimeout(r, 1000));
+            
+            try {
+                // 🆕 先检查界面是否收起来了，如果收起来就重新展开
+                let openBtn = document.querySelector('button[class*="TeleOpRightPanel_openBtnDesktop"]');
+                if (openBtn) {
+                    console.log('[评论任务] 界面已收起，点击展开...');
+                    openBtn.click();
+                    await new Promise(r => setTimeout(r, 1500));
+                }
+                
+                // 使用 CSS 类名选择器找 Queue 按钮
+                let queueBtn = Array.from(document.querySelectorAll('button[class*="TeleOpRightPanel_tab"]'))
+                    .find(el => (el.innerText || '').trim() === 'Queue');
+                
+                if (!queueBtn) {
+                    queueBtn = findTabBtn(CONFIG.text.queue);
+                }
+                
+                if (queueBtn) {
+                    queueBtn.click();
+                    console.log('[评论任务] ✅ 已返回 Queue');
+                } else {
+                    console.log('[评论任务] ⚠️ 未找到 Queue 按钮（不影响任务完成）');
+                }
+            } catch (queueError) {
+                console.log('[评论任务] ⚠️ 返回 Queue 失败:', queueError.message);
+                // 不影响任务标记为完成
+            }
+
+            // 标记任务成功
+            taskSuccess = true;
+
+        } catch (e) {
+            console.error('[评论任务] ❌ 执行错误:', e);
+            console.error('[评论任务] 错误堆栈:', e.stack);
+        } finally {
+            // 🆕 确保状态一定会被正确处理
+            console.log('[评论任务] finally 块执行，taskSuccess:', taskSuccess, 'successCount:', successCount);
+            
+            if (taskSuccess || successCount > 0) {
+                // 任务成功或至少发送了一条评论，标记为完成
+                Storage.markCommentTaskDone();
+                Storage.setCommentInProgress(false);
+                
+                // 🆕 记录评论任务完成日志
+                if (window.PrismaXController && window.PrismaXController.queueEventLog) {
+                    window.PrismaXController.queueEventLog('comment_task_complete', {
+                        successCount: successCount,
+                        timestamp: Date.now()
+                    });
+                }
+                
+                if (successCount > 0) {
+                    PrismaXNotifier.notifyCommentTaskComplete(successCount);
+                }
+                console.log('[评论任务] === 评论任务完成 ===');
+            } else {
+                // 任务失败，重置状态以便稍后重试
+                Storage.setCommentInProgress(false);
+                
+                // 🆕 记录评论任务失败日志
+                if (window.PrismaXController && window.PrismaXController.queueEventLog) {
+                    window.PrismaXController.queueEventLog('comment_task_failed', {
+                        reason: 'no_success_comments',
+                        timestamp: Date.now()
+                    });
+                }
+                console.log('[评论任务] === 评论任务失败，状态已重置，稍后可重试 ===');
+            }
+            
+            updateCommentTaskUI();
+        }
+    }
+
+    function hasMorningDoneToday() {
+        if (CONFIG.morningIgnoreDone) return false;
+        return localStorage.getItem(MORNING_DONE_KEY) === getTodayStr();
+    }
+
+    function markMorningDoneToday() {
+        console.log("[Stark HUD] 标记今日早八已完成");
+        localStorage.setItem(MORNING_DONE_KEY, getTodayStr());
+    }
+
+    function hasMorningPreReloadToday() {
+        return localStorage.getItem(MORNING_PRERELOAD_KEY) === getTodayStr();
+    }
+
+    function markMorningPreReloadToday() {
+        localStorage.setItem(MORNING_PRERELOAD_KEY, getTodayStr());
+    }
+
+    function parseTimeToday(hm) {
+        if (!hm || typeof hm !== 'string') return null;
+        const parts = hm.split(':');
+        if (parts.length < 2) return null;
+        const h = Number(parts[0]); const m = Number(parts[1]);
+        if (isNaN(h) || isNaN(m)) return null;
+        const now = new Date();
+        return new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
+    }
+
+    function getMorningWindowMs() {
+        if (!CONFIG.morningEnabled) return null;
+        const start = parseTimeToday(CONFIG.morningWindowStart);
+        const end = parseTimeToday(CONFIG.morningWindowEnd);
+        if (!start || !end) return null;
+        const startMs = start.getTime(); const endMs = end.getTime();
+        if (!(endMs > startMs)) return null;
+        return { startMs, endMs };
+    }
+
+    function getRankContextText() {
+        const panels = Array.from(document.querySelectorAll('div'));
+        const queuePanel = panels.find(el => {
+            const txt = el.innerText || "";
+            return txt.includes("You are now in the queue.") && txt.includes("users in front of you");
+        });
+        if (queuePanel) return queuePanel.innerText;
+        return document.body.innerText || "";
+    }
+
+    function parseRawRank(text) {
+        if (!text) return null;
+        let m = text.match(/(?:Position|Queue|Rank)\D*(\d{1,4})/i) || text.match(/(\d{1,4})\s*in\s*queue/i);
+        if (m) return parseInt(m[1], 10);
+        const m2 = text.match(/There'?s\s+(\d{1,4})\s+users?\s+in\s+front\s+of\s+you/i);
+        if (m2) return parseInt(m2[1], 10);
+        return null;
+    }
+
+    function getActiveTimerString(text) {
+        if (!text) return null;
+        const m = text.match(/Active:\s*(\d{1,2}:\d{2})/i);
+        return m ? m[1] : null;
+    }
+
+    function findBtn(keywords) {
+        const candidates = Array.from(document.querySelectorAll('button, div[role="button"], span'));
+        return candidates.find(el => {
+            if (!el.offsetParent) return false;
+            if (el.tagName === 'A' || el.closest('a')) return false;
+            const txt = el.innerText.trim();
+            if (!txt) return false;
+            if (CONFIG.text.blacklist.some(bad => txt.includes(bad))) return false;
+            const lower = txt.toLowerCase();
+            const isMatch = keywords.some(k => lower.includes(k.toLowerCase()));
+            if (isMatch && keywords === CONFIG.text.enter && lower.includes("leave")) return false;
+            return isMatch;
+        });
+    }
+
+    function isVisibleElement(el) {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    }
+
+    function findExactVisibleButton(labels) {
+        const normalized = labels.map(label => label.toLowerCase());
+        const candidates = Array.from(document.querySelectorAll('button, div[role="button"]'));
+        return candidates.find(el => {
+            if (!isVisibleElement(el)) return false;
+            const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+            return normalized.includes(text);
+        });
+    }
+
+    function confirmLeaveQueueIfPresent() {
+        let confirmBtn = document.querySelector('button[class*="leaveModalConfirmBtn"], .QueuePanel_leaveModalConfirmBtn__ZtiIr');
+        if (confirmBtn && !isVisibleElement(confirmBtn)) confirmBtn = null;
+        if (!confirmBtn) confirmBtn = findExactVisibleButton(['Leave queue', 'Leave Queue']);
+        if (!confirmBtn) return false;
+        try {
+            confirmBtn.click();
+            console.log('[Stark HUD] 已确认离开队列弹窗');
+            return true;
+        } catch (e) {
+            console.error('[Stark HUD] 点击 Leave queue 确认失败:', e);
+            return false;
+        }
+    }
+
+    function hasLeaveQueueModal() {
+        const confirmBtn = document.querySelector('button[class*="leaveModalConfirmBtn"], .QueuePanel_leaveModalConfirmBtn__ZtiIr');
+        if (confirmBtn && isVisibleElement(confirmBtn)) return true;
+        return !!findExactVisibleButton(['Leave queue', 'Leave Queue']);
+    }
+
+    function waitUntilQueueLeft(done, attempt = 0) {
+        const modalStillOpen = hasLeaveQueueModal();
+        const enterBtn = findBtn(CONFIG.text.enter);
+        const queueBtn = findBtn(CONFIG.text.queuing);
+
+        if (!modalStillOpen && (enterBtn || !queueBtn)) {
+            console.log('[Stark HUD] 已退出当前队列，可以切换手臂');
+            done(true);
+            return;
+        }
+
+        if (attempt >= 30) {
+            console.log('[Stark HUD] 等待退出队列超时');
+            done(false);
+            return;
+        }
+
+        setTimeout(() => waitUntilQueueLeft(done, attempt + 1), 500);
+    }
+
+    function confirmLeaveAndWait(done, attempt = 0) {
+        if (confirmLeaveQueueIfPresent()) {
+            setTimeout(() => waitUntilQueueLeft(done), 500);
+            return;
+        }
+        if (attempt >= 12) {
+            console.log('[Stark HUD] 未检测到离队确认弹窗，继续等待退出状态');
+            waitUntilQueueLeft(done);
+            return;
+        }
+        setTimeout(() => confirmLeaveAndWait(done, attempt + 1), 250);
+    }
+
+    function clickEnterAfterLeave() {
+        const enter = findBtn(CONFIG.text.enter);
+        if (enter) {
+            try {
+                enter.click();
+                console.log('[Stark HUD] 已重新进入队列');
+            } catch (e) {
+                console.error('[Stark HUD] 重新进入队列失败:', e);
+            }
+        } else {
+            console.log('[Stark HUD] 未找到重新进入按钮，等待主循环继续扫描');
+        }
+        updateWatchdogHeartbeat();
+    }
+
+    function getElementByXPath(xpath) {
+        try {
+            return document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+        } catch (e) {
+            console.error('[Stark HUD] XPath 解析失败:', xpath, e);
+            return null;
+        }
+    }
+
+    function clickXPath(xpath, label) {
+        const el = getElementByXPath(xpath);
+        if (!el || !isVisibleElement(el)) {
+            console.log(`[Stark HUD] 未找到或不可见: ${label}`);
+            return false;
+        }
+        try {
+            el.click();
+            console.log(`[Stark HUD] 已点击: ${label}`);
+            updateWatchdogHeartbeat();
+            return true;
+        } catch (e) {
+            console.error(`[Stark HUD] 点击失败: ${label}`, e);
+            return false;
+        }
+    }
+
+    function findButtonNearElement(root, keywords) {
+        if (!root) return null;
+        const lowerKeywords = keywords.map(k => k.toLowerCase());
+        const candidates = Array.from(root.querySelectorAll('button, div[role="button"], span'));
+        return candidates.find(el => {
+            if (!isVisibleElement(el)) return false;
+            const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+            return lowerKeywords.some(k => text.includes(k));
+        });
+    }
+
+    function clickElement(el, label) {
+        if (!el || !isVisibleElement(el)) {
+            console.log(`[Stark HUD] 未找到或不可见: ${label}`);
+            return false;
+        }
+        try {
+            el.scrollIntoView({ block: 'center', inline: 'center' });
+        } catch (e) {}
+        try {
+            el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+            el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+            el.click();
+            console.log(`[Stark HUD] 已点击: ${label}`);
+            updateWatchdogHeartbeat();
+            return true;
+        } catch (e) {
+            console.error(`[Stark HUD] 点击失败: ${label}`, e);
+            return false;
+        }
+    }
+
+    function findArmElement(label, xpath) {
+        const xpathEl = getElementByXPath(xpath);
+        if (xpathEl && isVisibleElement(xpathEl)) return xpathEl;
+
+        const candidates = Array.from(document.querySelectorAll('button, div[role="button"], div, li'));
+        const pattern = new RegExp(`\\b${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+        const titleEl = candidates.find(el => {
+            if (!isVisibleElement(el)) return false;
+            const text = (el.innerText || el.textContent || '').trim();
+            return pattern.test(text);
+        });
+        if (!titleEl) return null;
+
+        return titleEl.closest('button, div[role="button"], li, [class*="Card"], [class*="card"]') || titleEl;
+    }
+
+    function joinArm(label, xpath, attempt = 0, done = () => {}) {
+        const armEl = findArmElement(label, xpath);
+        if (!armEl) {
+            if (attempt < 20) {
+                if (attempt === 0) console.log(`[Stark HUD] 等待 ${label} 卡片加载...`);
+                setTimeout(() => joinArm(label, xpath, attempt + 1, done), 500);
+            } else {
+                console.log(`[Stark HUD] 等待 ${label} 超时，未切换`);
+                done(false);
+            }
+            return;
+        }
+
+        const clickedArm = clickElement(armEl, `${label} 卡片`);
+        if (!clickedArm) {
+            done(false);
+            return;
+        }
+
+        setTimeout(() => {
+            const cardRoot = armEl.closest('div') || armEl;
+            const localEnter = findButtonNearElement(cardRoot, CONFIG.text.enter);
+            if (localEnter) {
+                done(clickElement(localEnter, `${label} 卡片内入队按钮`));
+                return;
+            }
+
+            const globalEnter = findBtn(CONFIG.text.enter);
+            if (globalEnter) {
+                done(clickElement(globalEnter, '全局入队按钮'));
+                return;
+            }
+
+            console.log(`[Stark HUD] 未找到入队按钮，二次点击 ${label} 卡片尝试入队`);
+            done(clickElement(armEl, `${label} 卡片（二次）`));
+        }, 600);
+    }
+
+    function joinArenaArm(attempt = 0, done = () => {}) {
+        joinArm('Arena Arm', CONFIG.armSwitchTask.arenaArmXPath, attempt, done);
+    }
+
+    function joinTrainingGoldArm(attempt = 0, done = () => {}) {
+        joinArm('Training Arm Gold', CONFIG.armSwitchTask.trainingGoldArmXPath, attempt, done);
+    }
+
+    function waitConfirmThenEnter(attempt = 0) {
+        if (confirmLeaveQueueIfPresent()) {
+            setTimeout(() => waitUntilQueueLeft(() => clickEnterAfterLeave()), 500);
+            return;
+        }
+        if (attempt >= 10) {
+            console.log('[Stark HUD] 未检测到离队确认弹窗，尝试直接重新进入');
+            waitUntilQueueLeft(() => clickEnterAfterLeave());
+            return;
+        }
+        setTimeout(() => waitConfirmThenEnter(attempt + 1), 250);
+    }
+
+    function leaveQueueThenReenter(queueBtn) {
+        try {
+            queueBtn.click();
+        } catch (e) {
+            console.error('[Stark HUD] 点击离队按钮失败:', e);
+        }
+
+        setTimeout(() => waitConfirmThenEnter(0), 250);
+    }
+
+    function waitLeaveConfirmThenSwitchArena(attempt = 0) {
+        if (confirmLeaveQueueIfPresent() || attempt >= 10) {
+            const cfg = CONFIG.armSwitchTask;
+            waitUntilQueueLeft((leftOk) => {
+                if (!leftOk) {
+                    Storage.setArmSwitchInProgress(false);
+                    state.armSwitchInProgress = false;
+                    updateUI('未能退出 Gold 队列，Arena 切换中止', '--', '--', '#ff3333');
+                    return;
+                }
+                const avatarClicked = clickXPath(cfg.robotAvatarXPath, '左侧机器人头像');
+                setTimeout(() => {
+                    joinArenaArm(0, (arenaClicked) => {
+                        if (arenaClicked) {
+                            Storage.markArmSwitchDone();
+                            updateUI('已切换到 Arena Arm', '--', '--', '#00ff99');
+                        } else {
+                            Storage.setArmSwitchInProgress(false);
+                            updateUI('Arena Arm 切换失败，等待重试', '--', '--', '#ff3333');
+                        }
+                        state.armSwitchInProgress = false;
+                        console.log(`[Stark HUD] Arena Arm 切换完成 avatar=${avatarClicked} arena=${arenaClicked}`);
+                    });
+                }, cfg.afterAvatarDelay);
+            });
+            return;
+        }
+        setTimeout(() => waitLeaveConfirmThenSwitchArena(attempt + 1), 250);
+    }
+
+    function switchToArenaArm(queueBtn) {
+        if (state.armSwitchInProgress || Storage.isArmSwitchInProgress()) return;
+        state.armSwitchInProgress = true;
+        Storage.setArmSwitchInProgress(true);
+        updateUI('训练金臂已完成 6 次，切换 Arena Arm...', '--', '--', '#66ccff');
+        console.log('[Stark HUD] 开始切换到 Arena Arm');
+
+        if (queueBtn) {
+            try {
+                queueBtn.click();
+            } catch (e) {
+                console.error('[Stark HUD] 点击离队按钮失败:', e);
+            }
+            setTimeout(() => waitLeaveConfirmThenSwitchArena(0), 250);
+        } else {
+            waitLeaveConfirmThenSwitchArena(10);
+        }
+    }
+
+    function maybeSwitchToArenaArm(queueBtn) {
+        const cfg = CONFIG.armSwitchTask;
+        if (!cfg.enabled) return false;
+        if (Storage.isArmSwitchDone() || Storage.isArmSwitchInProgress() || state.armSwitchInProgress) return false;
+        if (Storage.get() < cfg.successThreshold) return false;
+        switchToArenaArm(queueBtn);
+        return true;
+    }
+
+    function returnToTrainingGold(queueBtn) {
+        const cfg = CONFIG.armSwitchTask;
+        updateUI('早八: 正在切回 Training Arm Gold...', '--', '--', '#66ccff');
+        const switchGold = () => {
+            const avatarClicked = clickXPath(cfg.robotAvatarXPath, '左侧机器人头像');
+            setTimeout(() => {
+                joinTrainingGoldArm(0, (goldClicked) => {
+                    if (goldClicked) {
+                        Storage.setCount(0);
+                        Storage.resetAnomaly();
+                        localStorage.removeItem(STORAGE_KEYS.ARM_SWITCH_DONE);
+                        Storage.setArmSwitchInProgress(false);
+                        state.armSwitchInProgress = false;
+                        state.morningRequeueActive = true;
+                        const c = document.getElementById('p-count');
+                        if (c) c.innerText = "0";
+                        updateAnomalyUI();
+                        updateUI('早八: 已切回 Training Arm Gold', '--', '--', '#00ff99');
+                    } else {
+                        Storage.setArmSwitchInProgress(false);
+                        state.armSwitchInProgress = false;
+                        updateUI('早八: 切回 Gold 失败，等待重试', '--', '--', '#ff3333');
+                    }
+                    console.log(`[Stark HUD] Gold 切换完成 avatar=${avatarClicked} gold=${goldClicked}`);
+                });
+            }, cfg.afterAvatarDelay);
+        };
+
+        if (queueBtn) {
+            state.armSwitchInProgress = true;
+            Storage.setArmSwitchInProgress(true);
+            try {
+                queueBtn.click();
+            } catch (e) {
+                console.error('[Stark HUD] 点击离队按钮失败:', e);
+            }
+            setTimeout(() => confirmLeaveAndWait((leftOk) => {
+                if (!leftOk) {
+                    Storage.setArmSwitchInProgress(false);
+                    state.armSwitchInProgress = false;
+                    updateUI('早八: 未能退出当前队列', '--', '--', '#ff3333');
+                    return;
+                }
+                switchGold();
+            }), 250);
+        } else {
+            switchGold();
+        }
+    }
+
+    const state = {
+        isOp: false,
+        sessStart: 0,
+        qStart: 0,
+        lastRawRank: -1,
+        rankWorseStreak: 0,
+        blindCount: 0,
+        lastMoveTime: Date.now(),
+        currentStuckLimit: 0,
+        lastTimerStr: null,
+        lastTimerChangeTime: 0,
+        clickRetryCount: 0,
+        requeueUsed: false,
+        morningRequeueActive: false,
+        morningTriggeredAt: 0,
+        morningExtraRequeueDone: false,
+        armSwitchInProgress: false,
+        standbyMode: false,
+        highRankLastHeavyScan: 0,
+        highRankLastUiUpdate: 0,
+        lastLoopDelay: 1000
+    };
+
+    function scheduleLoop(delay) {
+        state.lastLoopDelay = delay;
+        setTimeout(loop, delay);
+    }
+
+    function updateMorningInfo() {
+        const info = document.getElementById('p-morning-info');
+        if (!info) return;
+        if (!CONFIG.morningEnabled) { info.style.display = 'none'; return; }
+        const win = getMorningWindowMs();
+        if (!win) { info.style.display = 'none'; return; }
+
+        info.style.display = '';
+        const now = Date.now();
+        const { startMs, endMs } = win;
+
+        if (hasMorningDoneToday() || state.morningTriggeredAt) {
+            info.innerHTML = "✓ 早八协议已完成";
+            return;
+        }
+        if (now > endMs) {
+            info.innerHTML = "今日早八窗口已结束";
+            return;
+        }
+
+        const targetMs = Storage.getMorningTarget();
+        if (CONFIG.morningRandomInsideWindow) {
+            if (!targetMs) {
+                if (now < startMs) {
+                    const timeStr = new Date(startMs).toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
+                    info.innerHTML = `早八窗口 ${timeStr} 开启`;
+                } else {
+                    info.innerHTML = "正在生成触发时间点...";
+                }
+            } else {
+                if (now < startMs) {
+                    const timeStr = new Date(targetMs).toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
+                    info.innerHTML = `⏰ 早八目标: ${timeStr}`;
+                } else if (now >= startMs && now <= endMs) {
+                    if (now < targetMs) {
+                        const countdown = formatDurationMs(targetMs - now);
+                        const timeStr = new Date(targetMs).toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
+                        info.innerHTML = `⏳ 倒计时 ${countdown} (目标 ${timeStr})`;
+                    } else {
+                        info.innerHTML = "⚡ 正在触发早八协议...";
+                    }
+                }
+            }
+        } else {
+            if (now < startMs) {
+                const countdown = formatDurationMs(startMs - now);
+                info.innerHTML = `⏳ 早八倒计时: ${countdown}`;
+            } else {
+                info.innerHTML = "⚡ 正在触发早八协议...";
+            }
+        }
+    }
+
+    function performMorningRequeue() {
+        if (morningLock) return;
+        morningLock = true;
+        setTimeout(() => { morningLock = false; }, 1000);
+
+        console.log("[Stark HUD] 执行早八协议检查...");
+        updateWatchdogHeartbeat();
+
+        if (scriptPaused) {
+            console.log("[Stark HUD] 早八被跳过（脚本暂停）");
+            return;
+        }
+
+        const queueBtn = findBtn(CONFIG.text.queuing);
+        const enterBtn = findBtn(CONFIG.text.enter);
+
+        if (!queueBtn && !enterBtn) {
+            console.log("[Stark HUD] 早八触发时刻，但未检测到按钮！等待下一秒重试...");
+            updateUI("早八: 按钮未刷新，等待中...", "--", "--", "#ff3333");
+            return;
+        }
+
+        console.log("[Stark HUD] 发现按钮，触发点击！重置计数！");
+        PrismaXNotifier.notifyMorningTrigger();
+
+        Storage.setCount(0);
+        Storage.resetAnomaly();
+        const c = document.getElementById('p-count');
+        if (c) c.innerText = "0";
+        updateAnomalyUI();
+
+        state.morningTriggeredAt = Date.now();
+        markMorningDoneToday();
+        state.morningRequeueActive = true;
+        state.morningExtraRequeueDone = false;
+
+        if (queueBtn) {
+            if (CONFIG.armSwitchTask.morningReturnToGold) {
+                returnToTrainingGold(queueBtn);
+                return;
+            }
+            updateUI("早八: 正在重置连接...", "--", "--", "#66ccff");
+            leaveQueueThenReenter(queueBtn);
+            state.qStart = 0; state.lastRawRank = -1;
+        } else if (enterBtn) {
+            updateUI("早八: 建立新连接...", "--", "--", "#66ccff");
+            try { enterBtn.click(); } catch (e) { console.error(e); }
+            updateWatchdogHeartbeat();
+        }
+    }
+
+    function loopUnsafe() {
+        if (!document.body) { setTimeout(loop, 1000); return; }
+        window.__PRISMAX_LOOP_HEARTBEAT_AT = Date.now();
+        createPanel();
+
+        const now = Date.now();
+        updateWatchdogHeartbeat();
+
+        const currentDay = getTodayStr();
+        if (currentDay !== START_DAY) { safeReload("跨天自动刷新"); return; }
+
+        const win = getMorningWindowMs();
+
+        if (win) {
+            const { startMs, endMs } = win;
+            inMorningWindow = now >= startMs && now <= endMs;
+            if (inMorningWindow) {
+                startMorningWatchdog();
+            } else {
+                stopMorningWatchdog();
+                inMorningWindow = false;
+            }
+        }
+
+        if (win && !hasMorningDoneToday() && !hasMorningPreReloadToday()) {
+            const { startMs } = win;
+            if (now >= startMs - 60000 && now < startMs) {
+                console.log("[Stark HUD] 触发早八前预刷新");
+                markMorningPreReloadToday();
+                safeReload("早八前预刷新");
+                return;
+            }
+        }
+
+        if (win && !hasMorningDoneToday() && !state.morningTriggeredAt) {
+            const { startMs, endMs } = win;
+            if (CONFIG.morningRandomInsideWindow) {
+                let targetMs = Storage.getMorningTarget();
+                if (!targetMs || targetMs < startMs || targetMs > endMs) {
+                    targetMs = getRandomInt(startMs, endMs - 1);
+                    Storage.setMorningTarget(targetMs);
+                    console.log("[Stark HUD] 生成并保存早八时间:", new Date(targetMs).toLocaleTimeString());
+                }
+                if (now >= targetMs && now <= endMs) {
+                    performMorningRequeue();
+                }
+            } else {
+                if (now >= startMs && now <= endMs) {
+                    performMorningRequeue();
+                }
+            }
+        }
+
+        updateMorningInfo();
+
+        // 🆕 评论任务超时检测（防止任务卡死）
+        if (Storage.isCommentInProgress() && Storage.isCommentTaskTimeout()) {
+            console.log('[评论任务] ⚠️ 主循环检测到任务超时，执行自动重置');
+            Storage.resetCommentTaskState();
+            updateCommentTaskUI();
+        }
+        
+        // 🆕 评论任务触发检测（参照早八机制）
+        const commentWin = getCommentWindowMs();
+        if (commentWin && !Storage.isCommentTaskDone() && !Storage.isCommentInProgress()) {
+            const { startMs, endMs } = commentWin;
+            if (CONFIG.commentTask.randomInsideWindow) {
+                let targetMs = Storage.getCommentTarget();
+                if (!targetMs || targetMs < startMs || targetMs > endMs) {
+                    targetMs = getRandomInt(startMs, endMs - 1);
+                    Storage.setCommentTarget(targetMs);
+                    console.log("[评论任务] 生成并保存触发时间:", new Date(targetMs).toLocaleTimeString());
+                }
+                if (now >= targetMs && now <= endMs) {
+                    performCommentTask();
+                }
+            } else {
+                if (now >= startMs && now <= endMs) {
+                    performCommentTask();
+                }
+            }
+        }
+        updateCommentTaskUI();
+
+        if (scriptPaused) {
+            updateUI("脚本已暂停（点击底部按钮恢复）", "--", "--", "gray");
+            setTimeout(loop, 1000); return;
+        }
+
+        const enterBtn = findBtn(CONFIG.text.enter);
+        const endBtn = findBtn(CONFIG.text.end);
+        const queueBtn = findBtn(CONFIG.text.queuing);
+        const skipHeavyQueueScan = queueBtn && state.standbyMode && (now - state.highRankLastHeavyScan < CONFIG.highRankDomScanInterval);
+        const pageText = skipHeavyQueueScan ? '' : getRankContextText();
+
+        if (!state.currentStuckLimit) state.currentStuckLimit = randomStuckLimitMs();
+        let queueDurationDisplay = "--";
+        if (state.qStart > 0) queueDurationDisplay = formatDurationMs(now - state.qStart);
+
+        if (endBtn) {
+            state.qStart = 0;
+            state.standbyMode = false;
+
+            if (!state.isOp) {
+                state.isOp = true;
+                state.sessStart = now;
+                console.log("[Stark HUD] >>> 操作开始");
+                const currentCount = Storage.get() + 1;
+                PrismaXNotifier.notifyQueueSuccess(currentCount);
+            }
+            const durSec = Math.floor((now - state.sessStart) / 1000);
+            updateUI(`正在操作 (${durSec}s)`, "已暂停", "--", "#00ff00");
+            document.title = `>>> 操作中 ${durSec}s <<<`;
+            state.lastMoveTime = now; state.clickRetryCount = 0;
+        }
+        else if (queueBtn) {
+            if (state.isOp) {
+                const sessionDuration = now - state.sessStart;
+                state.isOp = false;
+
+                if (sessionDuration < CONFIG.minSessionTime) {
+                    console.log(`[Stark HUD] 检测到异常操作：时长 ${Math.floor(sessionDuration/1000)}s < ${CONFIG.minSessionTime/1000}s`);
+                    Storage.addAnomaly();
+                    updateAnomalyUI();
+
+                    // 🆕 同步异常计数到 PrismaXController（确保连续异常触发生效）
+                    if (window.PrismaXController) {
+                        const prevCount = parseInt(localStorage.getItem('prismax_consecutive_anomalies') || '0', 10);
+                        const newCount = prevCount + 1;
+                        console.log(`[异常同步] 连续异常: ${prevCount} -> ${newCount}`);
+                        
+                        // 更新 localStorage 中的连续异常计数
+                        try {
+                            localStorage.setItem('prismax_consecutive_anomalies', String(newCount));
+                        } catch (e) {}
+                        
+                        // 检查是否达到阈值
+                        if (newCount >= window.PrismaXController.config.consecutiveAnomalyThreshold) {
+                            console.log(`[异常同步] 🚨 连续异常达到 ${newCount} 次，触发自动退出！`);
+                            window.PrismaXController.handleConsecutiveAnomalies();
+                        }
+                    }
+                } else {
+                    Storage.add();
+                    const successCount = Storage.get();
+                    const anomalyCount = Storage.getAnomalyCount();
+                    PrismaXNotifier.notifyOperationComplete(successCount, anomalyCount);
+
+                    // 🆕 成功操作时重置连续异常计数
+                    try {
+                        localStorage.setItem('prismax_consecutive_anomalies', '0');
+                    } catch (e) {}
+                }
+            }
+
+            if (maybeSwitchToArenaArm(queueBtn)) {
+                setTimeout(loop, 1000);
+                return;
+            }
+
+            if (!state.qStart) {
+                state.qStart = now; state.lastRawRank = -1; state.rankWorseStreak = 0; state.blindCount = 0;
+                state.lastMoveTime = now; state.currentStuckLimit = randomStuckLimitMs(); state.requeueUsed = false;
+            }
+            state.clickRetryCount = 0;
+
+            if (skipHeavyQueueScan) {
+                const cachedRank = state.lastRawRank !== -1 ? state.lastRawRank + 1 : "?";
+                if (now - state.highRankLastUiUpdate >= CONFIG.highRankLoopInterval) {
+                    updateUI(`静候模式: 排名 #${cachedRank}，低频扫描中...`, "省资源", queueDurationDisplay, "orange");
+                    document.title = `Standby #${cachedRank}`;
+                    state.highRankLastUiUpdate = now;
+                }
+                updateWatchdogHeartbeat();
+                scheduleLoop(CONFIG.highRankLoopInterval);
+                return;
+            }
+            state.highRankLastHeavyScan = now;
+
+            const rawRank = parseRawRank(pageText);
+            const timerStrFromPage = getActiveTimerString(pageText);
+            const realRank = rawRank !== null ? rawRank + 1 : null;
+
+            if (realRank !== null && realRank > CONFIG.highRankStandbyThreshold) {
+                if (!state.standbyMode) {
+                    console.log(`[Stark HUD] 进入静候模式：排名 #${realRank}`);
+                    state.standbyMode = true;
+                    state.highRankLastHeavyScan = now;
+                    state.highRankLastUiUpdate = 0;
+                }
+                if (now - state.highRankLastUiUpdate >= CONFIG.highRankLoopInterval) {
+                    updateUI(`静候模式: 排名 #${realRank}，等待捡漏...`, "低频扫描", queueDurationDisplay, "orange");
+                    document.title = `Standby #${realRank}`;
+                    state.highRankLastUiUpdate = now;
+                }
+                state.lastMoveTime = now;
+                scheduleLoop(CONFIG.highRankLoopInterval);
+                return;
+            }
+
+            if (state.standbyMode && realRank !== null && realRank <= CONFIG.highRankStandbyThreshold) {
+                console.log(`[Stark HUD] 退出静候模式：排名回到 #${realRank}`);
+                state.standbyMode = false;
+                state.highRankLastUiUpdate = 0;
+            }
+
+            if (rawRank !== null) {
+                state.blindCount = 0;
+
+                if (state.morningRequeueActive) {
+                    if (realRank > 100) {
+                        if (!state.morningExtraRequeueDone) {
+                            state.morningExtraRequeueDone = true;
+                            updateUI(`早八: 排名 #${realRank} > 100，二次重排`, "--", queueDurationDisplay, "#66ccff");
+                            leaveQueueThenReenter(queueBtn);
+                            state.qStart = 0; state.lastRawRank = -1;
+                            setTimeout(loop, 1000); return;
+                        } else { state.morningRequeueActive = false; }
+                    } else {
+                        updateUI(`早八成功: 第 ${realRank} 名`, "--", queueDurationDisplay, "#00ff99");
+                        state.morningRequeueActive = false;
+                    }
+                }
+
+                if (state.lastRawRank !== -1 && rawRank > state.lastRawRank + CONFIG.rankDropTolerance) {
+                    state.rankWorseStreak++;
+                    if (state.rankWorseStreak >= 2) {
+                        safeReload(`排名倒退: ${state.lastRawRank + 1} -> ${realRank}`);
+                        return;
+                    }
+                } else {
+                    state.rankWorseStreak = 0;
+                }
+
+                if (rawRank !== state.lastRawRank) {
+                    state.lastRawRank = rawRank;
+                    state.lastMoveTime = now;
+                    state.currentStuckLimit = randomStuckLimitMs();
+                }
+
+                const stuckTime = now - state.lastMoveTime;
+                const timeLeftStr = formatDurationMs(Math.max(0, state.currentStuckLimit - stuckTime));
+
+                if (rawRank <= CONFIG.safeZoneRawLimit) {
+                    updateUI(`决赛圈: 第 ${realRank} 名`, "坚守位置", queueDurationDisplay, "magenta");
+                    state.lastMoveTime = now;
+                } else {
+                    const statusStr = timerStrFromPage ? `前车: ${timerStrFromPage} | 排名 #${realRank}` : `排队中: #${realRank}`;
+                    const color = timerStrFromPage ? "#ffcc00" : "cyan";
+                    updateUI(statusStr, `${timeLeftStr} (超时刷新)`, queueDurationDisplay, color);
+                    if (stuckTime > state.currentStuckLimit) {
+                        safeReload(`排名僵死 #${realRank}`);
+                        return;
+                    }
+                }
+                document.title = `Rank ${realRank}`;
+            } else {
+                state.blindCount++;
+                if (state.morningRequeueActive) state.morningRequeueActive = false;
+                const stuckTime = now - state.lastMoveTime;
+                const timeLeftStr = formatDurationMs(Math.max(0, state.currentStuckLimit - stuckTime));
+                const label = state.blindCount >= 3 ? "盲排中..." : "读取队列中...";
+                updateUI(label, `${timeLeftStr} (超时刷新)`, queueDurationDisplay, "#aaaaaa");
+                if (state.blindCount >= 3 && stuckTime > state.currentStuckLimit) {
+                    safeReload("盲排超时");
+                    return;
+                }
+            }
+
+            const timerStr = getActiveTimerString(pageText);
+            if (timerStr) {
+                if (timerStr !== state.lastTimerStr) {
+                    state.lastTimerStr = timerStr;
+                    state.lastTimerChangeTime = now;
+                }
+                else if (now - state.lastTimerChangeTime > CONFIG.timerFreezeTimeout) {
+                    safeReload("倒计时卡死检测");
+                    return;
+                }
+            }
+        }
+        else if (enterBtn) {
+            if (state.isOp) {
+                const sessionDuration = now - state.sessStart;
+                state.isOp = false;
+
+                if (sessionDuration < CONFIG.minSessionTime) {
+                    console.log(`[Stark HUD] 检测到异常操作：时长 ${Math.floor(sessionDuration/1000)}s < ${CONFIG.minSessionTime/1000}s`);
+                    Storage.addAnomaly();
+                    updateAnomalyUI();
+
+                    // 🆕 同步异常计数到 PrismaXController
+                    if (window.PrismaXController) {
+                        const prevCount = parseInt(localStorage.getItem('prismax_consecutive_anomalies') || '0', 10);
+                        const newCount = prevCount + 1;
+                        console.log(`[异常同步] 连续异常: ${prevCount} -> ${newCount}`);
+                        try {
+                            localStorage.setItem('prismax_consecutive_anomalies', String(newCount));
+                        } catch (e) {}
+                        if (newCount >= window.PrismaXController.config.consecutiveAnomalyThreshold) {
+                            console.log(`[异常同步] 🚨 连续异常达到 ${newCount} 次，触发自动退出！`);
+                            window.PrismaXController.handleConsecutiveAnomalies();
+                        }
+                    }
+                } else {
+                    Storage.add();
+                    const successCount = Storage.get();
+                    const anomalyCount = Storage.getAnomalyCount();
+                    PrismaXNotifier.notifyOperationComplete(successCount, anomalyCount);
+
+                    // 🆕 成功操作时重置连续异常计数
+                    try {
+                        localStorage.setItem('prismax_consecutive_anomalies', '0');
+                    } catch (e) {}
+                }
+            }
+
+            if (maybeSwitchToArenaArm(null)) {
+                setTimeout(loop, 1000);
+                return;
+            }
+
+            state.qStart = 0;
+            state.lastMoveTime = now;
+            state.standbyMode = false;
+
+            // 🆕 检查是否在冷却期内
+            if (window.PrismaXController) {
+                const controllerState = window.PrismaXController.getState();
+                if (controllerState.anomalyCooldownUntil && now < controllerState.anomalyCooldownUntil) {
+                    const remainingMs = controllerState.anomalyCooldownUntil - now;
+                    const remainingMin = Math.ceil(remainingMs / 60000);
+                    updateUI(`🔒 冷却期中：还剩 ${remainingMin} 分钟`, "--", "--", "orange");
+                    console.log(`[冷却期] 还剩 ${remainingMin} 分钟，不自动进入队列`);
+                    setTimeout(loop, 1000);
+                    return;
+                }
+            }
+
+            if (!enterBtn._pScheduled) {
+                state.clickRetryCount++;
+                const delay = getRandomInt(CONFIG.clickDelayMin, CONFIG.clickDelayMax);
+                enterBtn._pScheduled = true;
+                updateUI("发现目标信号", "--", "--", "yellow");
+                setTimeout(() => {
+                    try {
+                        enterBtn.click();
+                        updateWatchdogHeartbeat();
+                    } catch (e) {
+                        console.error(e);
+                    } finally {
+                        enterBtn._pScheduled = false;
+                    }
+                }, delay);
+            }
+        }
+        else {
+            updateUI("扫描信号中...", "--", "--", "#555555");
+            if (now - state.lastMoveTime > CONFIG.fallbackReloadTimeout) {
+                safeReload("无信号超时");
+                return;
+            }
+        }
+
+        setTimeout(loop, 1000);
+    }
+
+    function loop() {
+        try {
+            loopUnsafe();
+        } catch (e) {
+            recordScriptError('main.loop', e);
+            setTimeout(loop, 1000);
+        }
+    }
+
+    // 🆕 暴露评论任务测试函数到全局
+    window.performCommentTask = performCommentTask;
+    window.updateCommentTaskUI = updateCommentTaskUI;
+    window.resetCommentTask = resetCommentTask;
+    window.debugArenaArmSwitch = function() {
+        const arena = findArmElement('Arena Arm', CONFIG.armSwitchTask.arenaArmXPath);
+        const gold = findArmElement('Training Arm Gold', CONFIG.armSwitchTask.trainingGoldArmXPath);
+        const avatar = getElementByXPath(CONFIG.armSwitchTask.robotAvatarXPath);
+        const queueBtn = findBtn(CONFIG.text.queuing);
+        const result = {
+            avatarFound: !!avatar,
+            avatarVisible: !!avatar && isVisibleElement(avatar),
+            arenaFound: !!arena,
+            arenaVisible: !!arena && isVisibleElement(arena),
+            goldFound: !!gold,
+            goldVisible: !!gold && isVisibleElement(gold),
+            queueButtonFound: !!queueBtn,
+            armSwitchDone: Storage.isArmSwitchDone(),
+            armSwitchInProgress: Storage.isArmSwitchInProgress() || state.armSwitchInProgress
+        };
+        console.table(result);
+        return result;
+    };
+    window.testSwitchToArenaArm = function() {
+        Storage.setArmSwitchInProgress(false);
+        localStorage.removeItem(STORAGE_KEYS.ARM_SWITCH_DONE);
+        state.armSwitchInProgress = false;
+        const queueBtn = findBtn(CONFIG.text.queuing);
+        switchToArenaArm(queueBtn);
+    };
+    window.testReturnToTrainingGold = function() {
+        Storage.setArmSwitchInProgress(false);
+        state.armSwitchInProgress = false;
+        const queueBtn = findBtn(CONFIG.text.queuing);
+        returnToTrainingGold(queueBtn);
+    };
+    document.addEventListener('prismax:testSwitchToArenaArm', () => {
+        window.testSwitchToArenaArm();
+    });
+    document.addEventListener('prismax:testReturnToTrainingGold', () => {
+        window.testReturnToTrainingGold();
+    });
+    document.addEventListener('prismax:debugArenaArmSwitch', () => {
+        window.debugArenaArmSwitch();
+    });
+
+    setTimeout(loop, 3000);
+})();

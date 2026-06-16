@@ -1,0 +1,13 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Runtime state (changes constantly)
+prismax_state.json
+python_heartbeat.json
+
+# Logs
+logs/
+
+# Claude local config
+.claude/
