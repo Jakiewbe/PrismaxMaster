@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=360">
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <div id="app">
+        <div class="header">
+            <span class="logo">PRISMAX</span>
+            <span class="version">v3.0</span>
+        </div>
+
+        <div id="status-box" class="status-box">
+            <div class="status-dot" id="status-dot"></div>
+            <span id="status-text">Loading...</span>
+        </div>
+
+        <div class="section">
+            <div class="row">
+                <span class="label">Mode</span>
+                <span id="mode" class="value">--</span>
+            </div>
+            <div class="row">
+                <span class="label">今日成功</span>
+                <span id="count" class="value highlight">--</span>
+            </div>
+            <div class="row">
+                <span class="label">今日异常</span>
+                <span id="anomaly" class="value warn">--</span>
+            </div>
+            <div class="row">
+                <span class="label">Bridge</span>
+                <span id="bridge" class="value">--</span>
+            </div>
+            <div class="row">
+                <span class="label">通知</span>
+                <span id="notifier-stat" class="value">--</span>
+            </div>
+        </div>
+
+        <div class="section" id="tasks-section">
+            <div class="row">
+                <span class="label">早八</span>
+                <span id="morning-task" class="value">--</span>
+            </div>
+            <div class="row">
+                <span class="label">评论</span>
+                <span id="comment-task" class="value">--</span>
+            </div>
+            <div class="row">
+                <span class="label">手臂切换</span>
+                <span id="arm-task" class="value">--</span>
+            </div>
+        </div>
+
+        <div class="actions">
+            <button id="btn-toggle" class="btn">暂停脚本</button>
+            <button id="btn-reset" class="btn btn-warn">重置统计</button>
+        </div>
+        <div class="actions secondary">
+            <button id="btn-test-notify" class="btn btn-small">测试通知</button>
+            <button id="btn-test-bridge" class="btn btn-small">测试连接</button>
+        </div>
+        <div class="footer">
+            <button id="btn-options" class="btn btn-link">⚙ 设置</button>
+            <button id="btn-open" class="btn btn-link">📋 打开 PrismaX</button>
+        </div>
+    </div>
+    <script src="popup.js"></script>
+</body>
+</html>

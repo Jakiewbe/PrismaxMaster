@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PrismaX Assistant - Settings</title>
+    <link rel="stylesheet" href="options.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>⚙️ PrismaX Assistant <span class="version">v3.0</span></h1>
+            <p class="subtitle">Chrome Extension Configuration</p>
+        </header>
+
+        <form id="settings-form">
+            <!-- Notification Settings -->
+            <section>
+                <h2>🔔 通知设置</h2>
+                <div class="field">
+                    <label for="notifierType">通知渠道</label>
+                    <select id="notifierType">
+                        <option value="pushdeer">PushDeer</option>
+                        <option value="wecom">企业微信</option>
+                        <option value="serverchan">Server酱</option>
+                        <option value="telegram">Telegram</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="pushdeerKey">PushDeer Key</label>
+                    <input type="text" id="pushdeerKey" placeholder="PDU12345..." />
+                    <span class="hint">从 PushDeer 应用获取</span>
+                </div>
+                <div class="field">
+                    <label for="wecomWebhook">企业微信 Webhook URL</label>
+                    <input type="text" id="wecomWebhook" placeholder="https://qyapi.weixin.qq.com/..." />
+                </div>
+                <div class="field">
+                    <label for="serverchanKey">Server酱 SendKey</label>
+                    <input type="text" id="serverchanKey" placeholder="SCT..." />
+                </div>
+                <div class="field">
+                    <label for="telegramBotToken">Telegram Bot Token</label>
+                    <input type="text" id="telegramBotToken" placeholder="123456:ABC..." />
+                </div>
+                <div class="field">
+                    <label for="telegramChatId">Telegram Chat ID</label>
+                    <input type="text" id="telegramChatId" placeholder="-100..." />
+                </div>
+                <div class="field">
+                    <label for="notifyCooldown">通知冷却时间 (秒)</label>
+                    <input type="number" id="notifyCooldown" min="10" max="600" value="60" />
+                </div>
+            </section>
+
+            <!-- Timing Settings -->
+            <section>
+                <h2>⏰ 时间设置</h2>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="morningEnabled">早八协议</label>
+                        <select id="morningEnabled">
+                            <option value="true">启用</option>
+                            <option value="false">禁用</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="morningWindowStart">早八窗口开始</label>
+                        <input type="time" id="morningWindowStart" value="08:01" />
+                    </div>
+                    <div class="field">
+                        <label for="morningWindowEnd">早八窗口结束</label>
+                        <input type="time" id="morningWindowEnd" value="08:06" />
+                    </div>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="commentTaskEnabled">评论任务</label>
+                        <select id="commentTaskEnabled">
+                            <option value="true">启用</option>
+                            <option value="false">禁用</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="commentWindowStart">评论窗口开始</label>
+                        <input type="time" id="commentWindowStart" value="00:00" />
+                    </div>
+                    <div class="field">
+                        <label for="commentWindowEnd">评论窗口结束</label>
+                        <input type="time" id="commentWindowEnd" value="00:05" />
+                    </div>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="commentCountMin">评论数量 (最少)</label>
+                        <input type="number" id="commentCountMin" min="1" max="20" value="5" />
+                    </div>
+                    <div class="field">
+                        <label for="commentCountMax">评论数量 (最多)</label>
+                        <input type="number" id="commentCountMax" min="1" max="20" value="5" />
+                    </div>
+                </div>
+            </section>
+
+            <!-- Behavior Settings -->
+            <section>
+                <h2>🎮 行为设置</h2>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="consecutiveAnomalyThreshold">连续异常阈值</label>
+                        <input type="number" id="consecutiveAnomalyThreshold" min="1" max="10" value="2" />
+                        <span class="hint">连续异常达到此次数后自动退出排队</span>
+                    </div>
+                    <div class="field">
+                        <label for="anomalyCooldownMinutes">异常冷却时间 (分钟)</label>
+                        <input type="number" id="anomalyCooldownMinutes" min="5" max="360" value="60" />
+                    </div>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="minSessionTime">最少操作时间 (秒)</label>
+                        <input type="number" id="minSessionTime" min="10" max="120" value="40" />
+                        <span class="hint">低于此时长判定为异常操作</span>
+                    </div>
+                    <div class="field">
+                        <label for="stuckToleranceMin">卡住容忍时间-最小 (秒)</label>
+                        <input type="number" id="stuckToleranceMin" min="60" max="600" value="300" />
+                    </div>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="stuckToleranceMax">卡住容忍时间-最大 (秒)</label>
+                        <input type="number" id="stuckToleranceMax" min="60" max="600" value="360" />
+                    </div>
+                    <div class="field">
+                        <label for="safeZoneRawLimit">决赛圈阈值</label>
+                        <input type="number" id="safeZoneRawLimit" min="1" max="20" value="4" />
+                        <span class="hint">排名 <= 此值进入决赛圈</span>
+                    </div>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="standbyRankThreshold">静候模式排名阈值</label>
+                        <input type="number" id="standbyRankThreshold" min="10" max="500" value="100" />
+                        <span class="hint">排名 > 此值启动低频扫描省电模式</span>
+                    </div>
+                    <div class="field">
+                        <label for="clickDelayMin">点击延迟-最小 (ms)</label>
+                        <input type="number" id="clickDelayMin" min="200" max="5000" value="1000" />
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="clickDelayMax">点击延迟-最大 (ms)</label>
+                    <input type="number" id="clickDelayMax" min="200" max="5000" value="3000" />
+                </div>
+            </section>
+
+            <!-- Bridge Settings -->
+            <section>
+                <h2>🔗 Bridge 设置</h2>
+                <div class="field">
+                    <label for="bridgeUrl">Bridge URL</label>
+                    <input type="text" id="bridgeUrl" value="http://127.0.0.1:5000" />
+                    <span class="hint">Python Bridge 服务地址，一般不需要修改</span>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="enablePush">启用 HTTP 推送</label>
+                        <select id="enablePush">
+                            <option value="true">是</option>
+                            <option value="false">否</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="maxRetries">最大重试次数</label>
+                        <input type="number" id="maxRetries" min="1" max="10" value="3" />
+                    </div>
+                </div>
+            </section>
+
+            <!-- Arm Switch Settings -->
+            <section>
+                <h2>🗡️ 手臂切换设置</h2>
+                <div class="field">
+                    <label for="armSwitchEnabled">启用手臂切换</label>
+                    <select id="armSwitchEnabled">
+                        <option value="true">启用</option>
+                        <option value="false">禁用</option>
+                    </select>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="armSuccessThreshold">切换阈值 (成功次数)</label>
+                        <input type="number" id="armSuccessThreshold" min="1" max="50" value="6" />
+                    </div>
+                    <div class="field">
+                        <label for="morningReturnToGold">早八切回 Gold</label>
+                        <select id="morningReturnToGold">
+                            <option value="true">是</option>
+                            <option value="false">否</option>
+                        </select>
+                    </div>
+                </div>
+            </section>
+
+            <div class="actions">
+                <button type="submit" class="btn-primary">💾 保存设置</button>
+                <button type="button" id="btn-export" class="btn">📋 导出配置</button>
+                <button type="button" id="btn-import" class="btn">📥 导入配置</button>
+            </div>
+            <div id="save-status"></div>
+        </form>
+    </div>
+    <script src="options.js"></script>
+</body>
+</html>
