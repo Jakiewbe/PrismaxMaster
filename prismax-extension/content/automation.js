@@ -11,48 +11,17 @@ var PX = PX || {};
     // DOM Utility Functions
     // ============================================================
 
-    function getElementText(el) {
-        return [
-            el.innerText,
-            el.textContent,
-            el.getAttribute && el.getAttribute('aria-label'),
-            el.getAttribute && el.getAttribute('title'),
-            el.getAttribute && el.getAttribute('value')
-        ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
-    }
-
-    function toActionElement(el) {
-        if (!el) return null;
-        return el.closest && el.closest('button, [role="button"], input[type="button"], input[type="submit"]') || el;
-    }
-
     function findBtn(keywords, blacklist) {
         const bl = blacklist || (PX._config && PX._config.text ? PX._config.text.blacklist : []);
         const enterKeys = PX._config && PX._config.text ? PX._config.text.enter : [];
-        const candidates = Array.from(document.querySelectorAll(
-            'button, [role="button"], input[type="button"], input[type="submit"], span'
-        ));
-        for (const el of candidates) {
-            const actionEl = toActionElement(el);
-            if (!isVisibleElement(actionEl)) continue;
-            if (actionEl.tagName === 'A' || actionEl.closest('a')) continue;
-            const txt = getElementText(actionEl);
-            if (!txt) continue;
-            if (bl.some(bad => txt.includes(bad))) continue;
-            const lower = txt.toLowerCase();
-            const isMatch = keywords.some(k => lower.includes(k.toLowerCase()));
-            if (isMatch && keywords === enterKeys && lower.includes("leave")) continue;
-            if (isMatch) return actionEl;
-        }
-        return null;
+        return PX.Utils.findClickableByKeywords(keywords, {
+            blacklist: bl,
+            excludeLeave: keywords === enterKeys
+        });
     }
 
     function isVisibleElement(el) {
-        if (!el) return false;
-        const style = window.getComputedStyle(el);
-        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-        const rect = el.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
+        return PX.Utils.isVisibleElement(el);
     }
 
     function getRankContextText() {
@@ -63,24 +32,8 @@ var PX = PX || {};
     }
 
     function parseRawRank(text) {
-        if (!text) return null;
-        // Pattern 1: "X users in front"
-        const m1 = text.match(/(\d{1,4})\s*(?:users?|people)\s+in\s+front/i);
-        if (m1) return parseInt(m1[1], 10);
-        // Pattern 2: "Position: X"
-        const m2 = text.match(/Position[:\s]+(\d{1,4})/i);
-        if (m2) return parseInt(m2[1], 10) - 1;
-        // Pattern 3: "Queue: X"
-        const m3 = text.match(/Queue[:\s]+(\d{1,4})/i);
-        if (m3) return parseInt(m3[1], 10) - 1;
-        // Pattern 4: "Waiting: X"
-        const m4 = text.match(/Waiting[:\s]+(\d{1,4})/i);
-        if (m4) return parseInt(m4[1], 10) - 1;
-        // Pattern 5: "Rank #X" / "#X in queue"
-        const m5 = text.match(/(?:Rank|Queue\s*Position)\D{0,10}#?\s*(\d{1,4})/i) ||
-            text.match(/#\s*(\d{1,4})\s*(?:in\s+queue|queued)/i);
-        if (m5) return parseInt(m5[1], 10) - 1;
-        return null;
+        const rank = PX.Utils.parseQueueRank(text);
+        return rank === null ? null : Math.max(0, rank - 1);
     }
 
     function getActiveTimerString(text) {

@@ -56,6 +56,70 @@
         console.error('[PRISMAX脚本错误]', message, error);
     }
 
+    function isVisibleElement(el) {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    }
+
+    function getElementText(el) {
+        if (!el) return '';
+        return [
+            el.innerText,
+            el.textContent,
+            el.getAttribute && el.getAttribute('aria-label'),
+            el.getAttribute && el.getAttribute('title'),
+            el.getAttribute && el.getAttribute('value')
+        ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    }
+
+    function toActionElement(el) {
+        if (!el) return null;
+        return el.closest && el.closest('button, [role="button"], input[type="button"], input[type="submit"]') || el;
+    }
+
+    function findClickableByKeywords(keywords, options = {}) {
+        const blacklist = options.blacklist || [];
+        const candidates = Array.from(document.querySelectorAll(
+            'button, [role="button"], input[type="button"], input[type="submit"], span'
+        ));
+        for (const el of candidates) {
+            const actionEl = toActionElement(el);
+            if (!isVisibleElement(actionEl)) continue;
+            if (actionEl.tagName === 'A' || actionEl.closest('a')) continue;
+            const text = getElementText(actionEl);
+            if (!text) continue;
+            if (blacklist.some(bad => text.includes(bad))) continue;
+            const lower = text.toLowerCase();
+            if (options.excludeLeave && lower.includes('leave')) continue;
+            if (keywords.some(k => lower.includes(String(k).toLowerCase()))) return actionEl;
+        }
+        return null;
+    }
+
+    function parseQueueRank(text) {
+        if (!text) return null;
+        const frontMatch = text.match(/(\d{1,4})\s*(?:users?|people)\s+in\s+front/i) ||
+            text.match(/There'?s\s+(\d{1,4})\s+users?\s+in\s+front\s+of\s+you/i);
+        if (frontMatch) return parseInt(frontMatch[1], 10) + 1;
+
+        const patterns = [
+            /Position[:\s#]+(\d{1,4})/i,
+            /Queue[:\s#]+(\d{1,4})/i,
+            /Waiting[:\s#]+(\d{1,4})/i,
+            /(?:Rank|Queue\s*Position)\D{0,10}#?\s*(\d{1,4})/i,
+            /#\s*(\d{1,4})\s*(?:in\s+queue|queued)/i,
+            /(\d{1,4})\s*in\s*queue/i
+        ];
+        for (const pattern of patterns) {
+            const match = text.match(pattern);
+            if (match) return parseInt(match[1], 10);
+        }
+        return null;
+    }
+
     window.addEventListener('error', (event) => {
         recordScriptError('window.error', event.error || event.message);
     });
@@ -448,21 +512,7 @@
         }
 
         function findButton(keywords) {
-            const candidates = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'));
-            return candidates.find(el => {
-                const style = window.getComputedStyle(el);
-                const rect = el.getBoundingClientRect();
-                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-                if (rect.width <= 0 || rect.height <= 0) return false;
-                const text = [
-                    el.innerText,
-                    el.textContent,
-                    el.getAttribute('aria-label'),
-                    el.getAttribute('title'),
-                    el.getAttribute('value')
-                ].filter(Boolean).join(' ');
-                return keywords.some(k => text.includes(k));
-            });
+            return findClickableByKeywords(keywords);
         }
 
         function adjustPerformanceMode(rank) {
@@ -562,24 +612,7 @@
                 }
 
                 const pageText = document.body.innerText || '';
-                let rankMatch = pageText.match(/(\d{1,4})\s*(?:users?|people)\s+in\s+front/i);
-                let rank = rankMatch ? parseInt(rankMatch[1], 10) + 1 : null;
-
-                if (!rank) {
-                    rankMatch = pageText.match(/Position[:\s]+(\d{1,4})/i);
-                    rank = rankMatch ? parseInt(rankMatch[1], 10) : null;
-                }
-
-                if (!rank) {
-                    rankMatch = pageText.match(/Queue[:\s]+(\d{1,4})/i);
-                    rank = rankMatch ? parseInt(rankMatch[1], 10) : null;
-                }
-
-                if (!rank) {
-                    rankMatch = pageText.match(/(?:Rank|Queue\s*Position)\D{0,10}#?\s*(\d{1,4})/i) ||
-                        pageText.match(/#\s*(\d{1,4})\s*(?:in\s+queue|queued)/i);
-                    rank = rankMatch ? parseInt(rankMatch[1], 10) : null;
-                }
+                const rank = parseQueueRank(pageText);
 
                 adjustPerformanceMode(rank);
             }
@@ -1789,44 +1822,16 @@
 
     // 🆕 查找标签按钮（Live Chat / Queue / Open Live Chat）
     function findTabBtn(keywords) {
-        // 尝试多种选择器
-        const selectors = [
-            'button',
-            'div[role="button"]',
-            'span',
-            'div',
-            'a',
-            '[class*="tab"]',
-            '[class*="chat"]',
-            '[class*="button"]'
-        ];
-        
-        const allElements = document.querySelectorAll(selectors.join(', '));
-        const candidates = Array.from(allElements);
-        
-        console.log(`[评论任务] 搜索按钮，关键词: ${keywords.join(', ')}，候选元素数: ${candidates.length}`);
-        
-        const found = candidates.find(el => {
-            if (!el.offsetParent && el.style.display !== 'none') return false;
-            const txt = (el.innerText || el.textContent || '').trim();
-            if (!txt) return false;
-            
-            const matches = keywords.some(k => {
-                // 精确匹配或包含匹配
-                return txt.toLowerCase() === k.toLowerCase() || 
-                       txt.toLowerCase().includes(k.toLowerCase());
-            });
-            
-            if (matches) {
-                console.log(`[评论任务] 找到匹配按钮: "${txt}"`, el);
-            }
-            return matches;
-        });
+        const found = findClickableByKeywords(keywords);
+        console.log(`[评论任务] 搜索标签: ${keywords.join(', ')}，结果: ${found ? '找到' : '未找到'}`);
         
         if (!found) {
-            console.log('[评论任务] ⚠️ 未找到匹配按钮，列出所有可能的元素:');
-            candidates.slice(0, 20).forEach((el, i) => {
-                const txt = (el.innerText || '').trim().substring(0, 30);
+            console.log('[评论任务] ⚠️ 未找到匹配标签，列出可点击元素:');
+            Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'))
+                .filter(isVisibleElement)
+                .slice(0, 20)
+                .forEach((el, i) => {
+                const txt = getElementText(el).substring(0, 30);
                 if (txt) console.log(`   ${i}: "${txt}"`);
             });
         }
@@ -1844,7 +1849,7 @@
             let openLiveChatBtn = document.querySelector('button[class*="TeleOpRightPanel_openBtnDesktop"]');
             if (!openLiveChatBtn) {
                 openLiveChatBtn = Array.from(document.querySelectorAll('button, div, span'))
-                    .find(el => (el.innerText || '').trim().includes('Open Live Chat'));
+                    .find(el => isVisibleElement(el) && getElementText(el).includes('Open Live Chat'));
             }
             if (openLiveChatBtn) {
                 console.log('[评论任务] 检测到界面已收起，重新展开...');
@@ -1922,7 +1927,7 @@
                 const allBtns = document.querySelectorAll('button');
                 sendBtn = Array.from(allBtns).find(btn => {
                     const svg = btn.querySelector('svg');
-                    return svg && btn.offsetParent;
+                    return svg && isVisibleElement(btn);
                 });
             }
             
@@ -2008,7 +2013,7 @@
             // 方法0: 使用实际的 CSS 类名选择器（最可靠）
             try {
                 const tabButtons = document.querySelectorAll('button[class*="TeleOpRightPanel_tab"]');
-                liveChatBtn = Array.from(tabButtons).find(el => (el.innerText || '').trim() === 'Live Chat');
+                liveChatBtn = Array.from(tabButtons).find(el => isVisibleElement(el) && getElementText(el) === 'Live Chat');
                 console.log('[评论任务] 方法0 (CSS类名) 结果:', liveChatBtn ? '找到' : '未找到');
             } catch (e) {
                 console.log('[评论任务] 方法0 出错:', e.message);
@@ -2019,7 +2024,8 @@
                 try {
                     const allElements = Array.from(document.querySelectorAll('button, span, div'));
                     liveChatBtn = allElements.find(el => {
-                        const txt = (el.innerText || el.textContent || '').trim();
+                        if (!isVisibleElement(el)) return false;
+                        const txt = getElementText(el);
                         return txt === 'Live Chat';
                     });
                     console.log('[评论任务] 方法1 (精确匹配) 结果:', liveChatBtn ? '找到' : '未找到');
@@ -2031,10 +2037,10 @@
             // 方法2: 查找 Queue 旁边的元素
             if (!liveChatBtn) {
                 try {
-                    const queueEl = Array.from(document.querySelectorAll('button')).find(el => (el.innerText || '').trim() === 'Queue');
+                    const queueEl = Array.from(document.querySelectorAll('button')).find(el => isVisibleElement(el) && getElementText(el) === 'Queue');
                     if (queueEl && queueEl.parentElement) {
                         const siblings = Array.from(queueEl.parentElement.children);
-                        liveChatBtn = siblings.find(el => (el.innerText || '').trim().includes('Live Chat'));
+                        liveChatBtn = siblings.find(el => isVisibleElement(el) && getElementText(el).includes('Live Chat'));
                         console.log('[评论任务] 方法2 (Queue旁边) 结果:', liveChatBtn ? '找到' : '未找到');
                     }
                 } catch (e) {
@@ -2113,7 +2119,7 @@
                 
                 // 使用 CSS 类名选择器找 Queue 按钮
                 let queueBtn = Array.from(document.querySelectorAll('button[class*="TeleOpRightPanel_tab"]'))
-                    .find(el => (el.innerText || '').trim() === 'Queue');
+                    .find(el => isVisibleElement(el) && getElementText(el) === 'Queue');
                 
                 if (!queueBtn) {
                     queueBtn = findTabBtn(CONFIG.text.queue);
@@ -2224,15 +2230,8 @@
     }
 
     function parseRawRank(text) {
-        if (!text) return null;
-        let m = text.match(/(?:Position|Queue|Rank)\D*(\d{1,4})/i) || text.match(/(\d{1,4})\s*in\s*queue/i);
-        if (m) return parseInt(m[1], 10);
-        const m2 = text.match(/There'?s\s+(\d{1,4})\s+users?\s+in\s+front\s+of\s+you/i);
-        if (m2) return parseInt(m2[1], 10);
-        const m3 = text.match(/(?:Rank|Queue\s*Position)\D{0,10}#?\s*(\d{1,4})/i) ||
-            text.match(/#\s*(\d{1,4})\s*(?:in\s+queue|queued)/i);
-        if (m3) return parseInt(m3[1], 10);
-        return null;
+        const rank = parseQueueRank(text);
+        return rank === null ? null : Math.max(0, rank - 1);
     }
 
     function getActiveTimerString(text) {
@@ -2242,36 +2241,10 @@
     }
 
     function findBtn(keywords) {
-        const candidates = Array.from(document.querySelectorAll(
-            'button, [role="button"], input[type="button"], input[type="submit"], span'
-        ));
-        for (const el of candidates) {
-            const actionEl = el.closest && el.closest('button, [role="button"], input[type="button"], input[type="submit"]') || el;
-            if (!isVisibleElement(actionEl)) continue;
-            if (actionEl.tagName === 'A' || actionEl.closest('a')) continue;
-            const txt = [
-                actionEl.innerText,
-                actionEl.textContent,
-                actionEl.getAttribute && actionEl.getAttribute('aria-label'),
-                actionEl.getAttribute && actionEl.getAttribute('title'),
-                actionEl.getAttribute && actionEl.getAttribute('value')
-            ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
-            if (!txt) continue;
-            if (CONFIG.text.blacklist.some(bad => txt.includes(bad))) continue;
-            const lower = txt.toLowerCase();
-            const isMatch = keywords.some(k => lower.includes(k.toLowerCase()));
-            if (isMatch && keywords === CONFIG.text.enter && lower.includes("leave")) continue;
-            if (isMatch) return actionEl;
-        }
-        return null;
-    }
-
-    function isVisibleElement(el) {
-        if (!el) return false;
-        const style = window.getComputedStyle(el);
-        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-        const rect = el.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
+        return findClickableByKeywords(keywords, {
+            blacklist: CONFIG.text.blacklist,
+            excludeLeave: keywords === CONFIG.text.enter
+        });
     }
 
     function findExactVisibleButton(labels) {

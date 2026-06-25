@@ -167,18 +167,12 @@ var PX = PX || {};
 
     // Helper: find button by keywords
     function findBtn(keywords) {
-        const candidates = Array.from(document.querySelectorAll('button, div[role="button"]'));
         const enterKeys = PX._config && PX._config.text ? PX._config.text.enter : [];
-        const found = candidates.find(el => {
-            if (!el.offsetParent) return false;
-            const text = el.innerText || el.textContent || '';
-            const lower = text.toLowerCase();
-            const matches = keywords.some(k => lower.includes(k.toLowerCase()));
-            // Special: when looking for enter buttons, exclude "Leave"
-            if (matches && keywords === enterKeys && lower.includes("leave")) return false;
-            return matches;
+        const blacklist = PX._config && PX._config.text ? PX._config.text.blacklist : [];
+        return PX.Utils.findClickableByKeywords(keywords, {
+            blacklist: blacklist,
+            excludeLeave: keywords === enterKeys
         });
-        return found || null;
     }
 
     // Check if currently in morning window

@@ -19,36 +19,16 @@ var PX = PX || {};
     }
 
     function findTabBtn(keywords) {
-        const selectors = [
-            'button', 'div[role="button"]', 'span', 'div', 'a',
-            '[class*="tab"]', '[class*="chat"]', '[class*="button"]'
-        ];
-
-        const allElements = document.querySelectorAll(selectors.join(', '));
-        const candidates = Array.from(allElements);
-
-        console.log(`[评论任务] 搜索按钮，关键词: ${keywords.join(', ')}，候选元素数: ${candidates.length}`);
-
-        const found = candidates.find(el => {
-            if (!el.offsetParent && el.style.display !== 'none') return false;
-            const txt = (el.innerText || el.textContent || '').trim();
-            if (!txt) return false;
-
-            const matches = keywords.some(k => {
-                return txt.toLowerCase() === k.toLowerCase() ||
-                       txt.toLowerCase().includes(k.toLowerCase());
-            });
-
-            if (matches) {
-                console.log(`[评论任务] 找到匹配按钮: "${txt}"`, el);
-            }
-            return matches;
-        });
+        const found = PX.Utils.findClickableByKeywords(keywords);
+        console.log(`[评论任务] 搜索标签: ${keywords.join(', ')}，结果: ${found ? '找到' : '未找到'}`);
 
         if (!found) {
-            console.log('[评论任务] ⚠️ 未找到匹配按钮，列出所有可能的元素:');
-            candidates.slice(0, 20).forEach((el, i) => {
-                const txt = (el.innerText || '').trim().substring(0, 30);
+            console.log('[评论任务] ⚠️ 未找到匹配标签，列出可点击元素:');
+            Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'))
+                .filter(PX.Utils.isVisibleElement)
+                .slice(0, 20)
+                .forEach((el, i) => {
+                const txt = PX.Utils.getElementText(el).substring(0, 30);
                 if (txt) console.log(`   ${i}: "${txt}"`);
             });
         }
@@ -66,7 +46,7 @@ var PX = PX || {};
             let openLiveChatBtn = document.querySelector('button[class*="TeleOpRightPanel_openBtnDesktop"]');
             if (!openLiveChatBtn) {
                 openLiveChatBtn = Array.from(document.querySelectorAll('button, div, span'))
-                    .find(el => (el.innerText || '').trim().includes('Open Live Chat'));
+                    .find(el => PX.Utils.isVisibleElement(el) && PX.Utils.getElementText(el).includes('Open Live Chat'));
             }
             if (openLiveChatBtn) {
                 console.log('[评论任务] 检测到界面已收起，重新展开...');
@@ -135,8 +115,8 @@ var PX = PX || {};
             if (!sendBtn) {
                 const allBtns = Array.from(document.querySelectorAll('button'));
                 sendBtn = allBtns.find(b => {
-                    if (!b.offsetParent) return false;
-                    const txt = (b.innerText || '').trim().toLowerCase();
+                    if (!PX.Utils.isVisibleElement(b)) return false;
+                    const txt = PX.Utils.getElementText(b).toLowerCase();
                     return txt.includes('send') || txt.includes('发送') ||
                            (b.querySelector('svg') && b.offsetWidth < 80);
                 });
@@ -284,7 +264,7 @@ var PX = PX || {};
         // Method 0: Exact class match
         let tab = document.querySelector('button[class*="TeleOpRightPanel_tab"]');
         if (tab) {
-            const txt = (tab.innerText || '').trim();
+            const txt = PX.Utils.getElementText(tab);
             if (txt === 'Live Chat' || txt.toLowerCase().includes('live chat')) {
                 console.log('[评论任务] 方法0: 通过精确类名找到 Live Chat 标签');
                 tab.click();
@@ -296,8 +276,8 @@ var PX = PX || {};
         // Method 1: Exact text match on buttons
         const allBtns = Array.from(document.querySelectorAll('button, span, div'));
         tab = allBtns.find(el => {
-            if (!el.offsetParent) return false;
-            const txt = (el.innerText || '').trim();
+            if (!PX.Utils.isVisibleElement(el)) return false;
+            const txt = PX.Utils.getElementText(el);
             return txt === 'Live Chat' || txt === 'Open Live Chat';
         });
         if (tab) {
@@ -309,7 +289,8 @@ var PX = PX || {};
 
         // Method 2: Find Queue button first, then find Live Chat sibling
         const queueBtn = Array.from(document.querySelectorAll('button')).find(el => {
-            const txt = (el.innerText || '').trim();
+            if (!PX.Utils.isVisibleElement(el)) return false;
+            const txt = PX.Utils.getElementText(el);
             return txt === 'Queue';
         });
         if (queueBtn) {
@@ -317,7 +298,8 @@ var PX = PX || {};
             if (parent) {
                 const siblings = Array.from(parent.querySelectorAll('button, span, div'));
                 tab = siblings.find(el => {
-                    const txt = (el.innerText || '').trim();
+                    if (!PX.Utils.isVisibleElement(el)) return false;
+                    const txt = PX.Utils.getElementText(el);
                     return txt === 'Live Chat' || txt === 'Open Live Chat';
                 });
                 if (tab) {
