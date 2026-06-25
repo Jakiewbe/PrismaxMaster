@@ -17,7 +17,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "processed_registry_path": "data/logs/processed_episodes.json",
         "local_video_dir": "data/videos",
     },
-    "scorer": {"version": "v0.2.0"},
+    "playback": {
+        "enabled": True,
+        "speed_multiplier": 10.0,
+        "sample_every_n_frames": 2,
+        "simulate_delay": True,
+        "segment_gap_seconds": 1.5,
+    },
+    "scorer": {"version": "v0.3.0"},
     "browser": {
         "urls": {
             "dashboard": "https://app.prismax.ai/",
@@ -32,10 +39,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "breadcrumb": ".DataQAReview_breadcrumbLink__uMtJZ",
             "playback_speed": ".DataQAReview_ctrlSpeed__G1Whv",
             "validation_rules_link": ".DataQAReview_valLink__Od5GV",
-            "quality_ranges": "input[type='range']",
             "videos": "video",
+            "form_grid_table": "table.DataQAReview_gridTable__AbOV0",
+            "form_row": "table.DataQAReview_gridTable__AbOV0 tbody tr",
+            "form_cell": "td.DataQAReview_gridTdCenter__u0I-h",
+            "form_dot": ".DataQAReview_dot__u0Ot0",
+            "form_dot_selected": ".DataQAReview_dot__u0Ot0.DataQAReview_dotSelected__",
+            "form_row_label": ".DataQAReview_rowLabelText__v2yHF",
+            "scoring_panel": ".DataQAReview_panel__0xNzL",
+            "pass_fail_label": ".DataQAReview_rLabel__FE-lY",
+            "score_section": ".DataQAReview_scoreSection__iWLub",
+            "gate_score_value": ".DataQAReview_statVal__sHAXi",
         },
         "text_patterns": {"episode_id": r"Episode #(\d+)", "progress": r"(\d+) of (\d+)"},
+        "click_method": "react_dot",
+        "click_events": ["mousedown", "mouseup", "click"],
     },
     "form": {
         "pass_fail_items": {
@@ -71,7 +89,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "rules": {
         "black_frame": {"hard_fail": 0.50, "suspicious": 0.12},
-        "freeze_ratio": {"hard_fail": 0.80, "suspicious": 0.30},
+        "freeze_ratio": {"hard_fail": 0.95, "suspicious": 0.45},
         "blur_score": {"hard_fail": 10, "suspicious": 35},
         "brightness": {
             "hard_fail_min": 5,

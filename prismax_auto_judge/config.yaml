@@ -7,8 +7,15 @@ runtime:
   processed_registry_path: "data/logs/processed_episodes.json"
   local_video_dir: "data/videos"
 
+playback:
+  enabled: true
+  speed_multiplier: 10.0        # 10x speed (1.8min video → ~11s)
+  sample_every_n_frames: 2      # process every 2nd frame
+  simulate_delay: true           # actually sleep between frames
+  segment_gap_seconds: 1.5       # pause between segments (simulates human switching)
+
 scorer:
-  version: "v0.2.0"
+  version: "v0.3.0"  # +playback simulation +segment polling +timeline anomaly detection
 
 browser:
   urls:
@@ -16,18 +23,39 @@ browser:
     review_list: "https://app.prismax.ai/data/review"
     review_detail_pattern: "https://app.prismax.ai/data/review/{task_id}?upload={upload_id}"
   selectors:
+    # Navigation
     begin_validating_button: "button:has-text('Begin Validating')"
     review_earn_button: "button:has-text('Review & Earn')"
-    submit_button: ".DataQAReview_submitBtn__I7VB7"
+    # Video player
     scenario_trigger: ".DataQAReview_scenarioTrigger__qCwVC"
     breadcrumb: ".DataQAReview_breadcrumbLink__uMtJZ"
     playback_speed: ".DataQAReview_ctrlSpeed__G1Whv"
     validation_rules_link: ".DataQAReview_valLink__Od5GV"
-    quality_ranges: "input[type='range']"
     videos: "video"
+    # Submit
+    submit_button: ".DataQAReview_submitBtn__I7VB7"
+    # Scoring form (React table grid with dot spans)
+    pass_fail_table: "table.DataQAReview_gridTable__AbOV0:first-of-type"
+    quality_table: "table.DataQAReview_gridTable__AbOV0:last-of-type"
+    form_grid_table: "table.DataQAReview_gridTable__AbOV0"
+    form_row: "table.DataQAReview_gridTable__AbOV0 tbody tr"
+    form_cell: "td.DataQAReview_gridTdCenter__u0I-h"
+    form_dot: ".DataQAReview_dot__u0Ot0"
+    form_dot_selected: ".DataQAReview_dot__u0Ot0.DataQAReview_dotSelected__"
+    form_row_label: ".DataQAReview_rowLabelText__v2yHF"
+    # Scoring panel container
+    scoring_panel: ".DataQAReview_panel__0xNzL"
+    score_section: ".DataQAReview_scoreSection__iWLub"
+    pass_fail_label: ".DataQAReview_rLabel__FE-lY"
+    # Gate/Score/Vote footer
+    gate_card: ".DataQAReview_statCard__IZ5rw"
+    gate_score_value: ".DataQAReview_statVal__sHAXi"
   text_patterns:
     episode_id: "Episode #(\\d+)"
     progress: "(\\d+) of (\\d+)"
+  # How to interact with the form (React custom components)
+  click_method: "react_dot"
+  click_events: ["mousedown", "mouseup", "click"]
 
 form:
   pass_fail_items:
@@ -80,8 +108,8 @@ rules:
     hard_fail: 0.50
     suspicious: 0.12
   freeze_ratio:
-    hard_fail: 0.80
-    suspicious: 0.30
+    hard_fail: 0.95
+    suspicious: 0.45
   blur_score:
     hard_fail: 10
     suspicious: 35

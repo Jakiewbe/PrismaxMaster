@@ -188,7 +188,73 @@ if decision == "UNCERTAIN":
     # 不提交，等待人工
 ```
 
-## 四、config.yaml 规则参数与界面阈值对应
+## 四、评分表单真实 DOM 结构 (v0.2.0 实测)
+
+### 4.1 PASS/FAIL 表格
+```html
+<table class="DataQAReview_gridTable__AbOV0">
+  <thead>
+    <tr><th></th><th>Pass</th><th>Fail</th></tr>
+  </thead>
+  <tbody>
+    <tr> <!-- Row 0 -->
+      <td class="DataQAReview_gridTdLabel__68hPC">Clear camera feed</td>
+      <td class="DataQAReview_gridTdCenter__u0I-h"><span class="DataQAReview_dot__u0Ot0"></span></td>
+      <td class="DataQAReview_gridTdCenter__u0I-h"><span class="DataQAReview_dot__u0Ot0"></span></td>
+    </tr>
+    <!-- ... 3 more rows ... -->
+  </tbody>
+</table>
+```
+- 点击 `<td>` → React 更新 `<span class="dot">` → 添加 `DataQAReview_dotSelected__` 类
+- 需要触发 React 合成事件: `mousedown + mouseup + click`
+- PASS col=1, FAIL col=2
+
+### 4.2 QUALITY 表格
+```html
+<table class="DataQAReview_gridTable__AbOV0">  <!-- 第二个同名表格 -->
+  <thead>
+    <tr><th></th><th>Poor</th><th>Weak</th><th>OK</th><th>Good</th><th>Exc.</th></tr>
+  </thead>
+  <tbody>
+    <tr> <!-- Row 0: Robot control quality -->
+      <td class="gridTdLabel">Robot control quality</td>
+      <td class="gridTdCenter"><span class="dot"></span></td>  <!-- Poor  col=1 -->
+      <td class="gridTdCenter"><span class="dot"></span></td>  <!-- Weak  col=2 -->
+      <td class="gridTdCenter"><span class="dot"></span></td>  <!-- OK    col=3 -->
+      <td class="gridTdCenter"><span class="dot"></span></td>  <!-- Good  col=4 -->
+      <td class="gridTdCenter"><span class="dot"></span></td>  <!-- Exc.  col=5 -->
+    </tr>
+    <!-- ... 3 more rows ... -->
+  </tbody>
+</table>
+```
+
+### 4.3 关键 CSS 选择器速查
+| 用途 | 选择器 |
+|------|--------|
+| 表格容器 | `table.DataQAReview_gridTable__AbOV0` |
+| 行 | `table.DataQAReview_gridTable__AbOV0 tbody tr` |
+| 可选单元格 | `td.DataQAReview_gridTdCenter__u0I-h` |
+| 单选圆点 | `.DataQAReview_dot__u0Ot0` |
+| 已选圆点 | `.DataQAReview_dot__u0Ot0.DataQAReview_dotSelected__` |
+| 行标签 | `.DataQAReview_rowLabelText__v2yHF` |
+| 提交按钮 | `.DataQAReview_submitBtn__I7VB7` (初始 disabled) |
+| PASS/FAIL 标题 | `.DataQAReview_rLabel__FE-lY` |
+| Gate/Score/Vote | `.DataQAReview_statCard__IZ5rw` |
+
+### 4.4 点击方式
+```javascript
+// 标准 click() 不够，React 需要合成事件序列
+const dot = cell.querySelector('[class*="dot"]');
+["mousedown", "mouseup", "click"].forEach(type => {
+    dot.dispatchEvent(new MouseEvent(type, {bubbles: true}));
+});
+dot.click();
+cell.click();
+```
+
+## 五、config.yaml 规则参数与界面阈值对应
 
 ```yaml
 # 这些参数决定 scorer 的输出，最终驱动浏览器表单
@@ -212,14 +278,14 @@ safety:
   submit_cooldown_seconds: 2          # 提交间隔
 ```
 
-## 五、扩展各模块职责
+## 六、扩展各模块职责
 
-### 5.1 content-script.js — 入口
+### 6.1 content-script.js — 入口
 - 加载顺序: Storage → Config → Notifier → Controller → Automation
 - 暴露 `window.PrismAX` 调试 API
 - 处理 popup ↔ content script 消息通信
 
-### 5.2 controller.js — 状态检测
+### 6.2 controller.js — 状态检测
 - 页面状态机: STANDBY → QUEUING → OPERATING
 - 检测按钮关键词判断当前状态:
   - `["End Tele-Operation", "End Session", ...]` → OPERATING
@@ -229,14 +295,14 @@ safety:
 - 推送间隔: 500ms (normal) / 3000ms (standby)
 - 钱包弹窗检测 + 自动关闭
 
-### 5.3 panel.js — HUD 面板
+### 6.3 panel.js — HUD 面板
 - 注入 `#stark-panel` 到页面右下角
 - 显示: 自动刷新倒数、排队时长、异常次数、评论任务、今日战绩
 - 按钮: 暂停脚本 / 重置协议
 - 可拖拽、可折叠
 - 仅在 controller 检测到有效页面状态后注入
 
-### 5.4 automation.js — 主循环
+### 6.4 automation.js — 主循环
 - 队列监控 + 自动点击进入
 - 异常检测: 操作时长 <40s → 异常
 - 连续异常 ≥2 → 自动退出 + 冷却 60 分钟
@@ -244,17 +310,17 @@ safety:
 - 早八窗口 (08:01-08:06) 特殊处理
 - 排名检测 + 静候模式 (rank >100 → 降频)
 
-### 5.5 popup.js — 弹窗
+### 6.5 popup.js — 弹窗
 - 4 按钮: 暂停脚本 | 运行统计 | 测试通知 | 更多设置
 - 每 2 秒自动刷新状态
 - 通过 `chrome.tabs.sendMessage` 与 content script 通信
 
-### 5.6 service-worker.js — 后台
+### 6.6 service-worker.js — 后台
 - 早八闹钟: 每天 7:59
 - 评论闹钟: 每天 23:59
 - Tab 管理: 自动查找/创建 PrismaX 标签页
 
-## 六、control_adapter.py 待实现接口
+## 七、control_adapter.py 待实现接口
 
 ```python
 class PrismaXControlAdapter:
@@ -297,7 +363,7 @@ class PrismaXControlAdapter:
         # 记录跳过原因到日志
 ```
 
-## 七、DOM 选择器速查表
+## 八、DOM 选择器速查表
 
 | 目标 | 选择器 |
 |------|--------|
@@ -306,17 +372,21 @@ class PrismaXControlAdapter:
 | Submit 按钮 | `.DataQAReview_submitBtn__I7VB7` |
 | 场景/任务名 | `.DataQAReview_scenarioTrigger__qCwVC` |
 | 面包屑 | `.DataQAReview_breadcrumbLink__uMtJZ` |
+| 评分面板 | `.DataQAReview_panel__0xNzL` |
+| PASS/FAIL 表格 | `table.DataQAReview_gridTable__AbOV0` (第一个) |
+| QUALITY 表格 | `table.DataQAReview_gridTable__AbOV0` (第二个) |
+| 表格行 | `table.DataQAReview_gridTable__AbOV0 tbody tr` |
+| 点击单元格 | `td.DataQAReview_gridTdCenter__u0I-h` |
+| 单选圆点 | `.DataQAReview_dot__u0Ot0` |
+| 已选圆点 | `.DataQAReview_dot__u0Ot0.DataQAReview_dotSelected__` |
+| 行标签 | `.DataQAReview_rowLabelText__v2yHF` |
 | 播放速度 | `.DataQAReview_ctrlSpeed__G1Whv` |
 | Episode 标题 | 页面文本正则: `Episode #(\d+)` |
 | 进度 (1 of 14) | 页面文本正则: `(\d+) of (\d+)` |
 | 视频元素 | `video` |
-| 评分规则链接 | `.DataQAReview_valLink__Od5GV` |
-| Quality 滑块 | `input[type='range']` |
 | 扩展面板 | `#stark-panel` |
-| 扩展暂停按钮 | `#st-toggle` |
-| 扩展重置按钮 | `#st-reset` |
 
-## 八、数据流完整路径
+## 九、数据流完整路径
 
 ```
 1. 视频输入
@@ -350,7 +420,7 @@ class PrismaXControlAdapter:
    扩展 → PushDeer / 企业微信 / Server酱 / Telegram
 ```
 
-## 九、运行模式对照
+## 十、运行模式对照
 
 | 模式 | config.yaml | 行为 |
 |------|-------------|------|

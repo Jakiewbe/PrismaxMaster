@@ -139,6 +139,10 @@ class PrismaXScorer:
                 hard.append(err)
 
         for view_name, view_features in features.items():
+            if view_name.startswith("_"):
+                continue
+            if not isinstance(view_features, dict):
+                continue
             if not view_features.get("present", False):
                 if view_features.get("required"):
                     hard.append(f"required_view_missing:{view_name}")
@@ -423,7 +427,11 @@ class PrismaXScorer:
             "can_fill": decision in {"PASS", "FAIL"},
             "can_submit": decision in {"PASS", "FAIL"},
             "submit_selector": selectors.get("submit_button"),
-            "quality_range_selector": selectors.get("quality_ranges"),
+            "form_grid_table": selectors.get("form_grid_table"),
+            "form_cell": selectors.get("form_cell"),
+            "form_dot": selectors.get("form_dot"),
+            "click_method": self.config.get("browser", {}).get("click_method", "react_dot"),
+            "click_events": self.config.get("browser", {}).get("click_events", ["mousedown", "mouseup", "click"]),
             "pass_fail_checks": checks,
             "quality_sliders": sliders,
             "gate_score": gate_score,
