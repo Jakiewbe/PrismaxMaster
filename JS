@@ -1290,6 +1290,7 @@
         COMMENT_IN_PROGRESS: 'p_comment_in_progress',
         ARM_SWITCH_DONE: 'p_arm_switch_done',
         ARM_SWITCH_IN_PROGRESS: 'p_arm_switch_in_progress',
+        CURRENT_ARM: 'p_current_arm',
         COMMENT_TASK_START_TIME: 'p_comment_start_time'  // 🆕 记录任务开始时间（用于超时检测）
     };
     const MORNING_DONE_KEY = 'p_morning_done';
@@ -1331,6 +1332,7 @@
                 this.resetAnomaly();
                 localStorage.removeItem(MORNING_DONE_KEY);
                 localStorage.removeItem(STORAGE_KEYS.MORNING_TARGET);
+                localStorage.removeItem(STORAGE_KEYS.CURRENT_ARM);
                 location.reload();
             }
         },
@@ -1409,6 +1411,16 @@
         markArmSwitchDone() {
             localStorage.setItem(STORAGE_KEYS.ARM_SWITCH_DONE, getTodayStr());
             localStorage.removeItem(STORAGE_KEYS.ARM_SWITCH_IN_PROGRESS);
+        },
+        clearArmSwitchDone() {
+            localStorage.removeItem(STORAGE_KEYS.ARM_SWITCH_DONE);
+        },
+        getCurrentArm() {
+            return localStorage.getItem(STORAGE_KEYS.CURRENT_ARM) || '';
+        },
+        setCurrentArm(v) {
+            if (v) localStorage.setItem(STORAGE_KEYS.CURRENT_ARM, v);
+            else localStorage.removeItem(STORAGE_KEYS.CURRENT_ARM);
         },
         isArmSwitchInProgress() {
             return localStorage.getItem(STORAGE_KEYS.ARM_SWITCH_IN_PROGRESS) === getTodayStr();
@@ -2355,10 +2367,10 @@
     function findButtonNearElement(root, keywords) {
         if (!root) return null;
         const lowerKeywords = keywords.map(k => k.toLowerCase());
-        const candidates = Array.from(root.querySelectorAll('button, div[role="button"], span'));
+        const candidates = Array.from(root.querySelectorAll('button, [role="button"], span'));
         return candidates.find(el => {
             if (!isVisibleElement(el)) return false;
-            const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+            const text = getElementText(el).toLowerCase();
             return lowerKeywords.some(k => text.includes(k));
         });
     }
@@ -2388,19 +2400,63 @@
         const xpathEl = getElementByXPath(xpath);
         if (xpathEl && isVisibleElement(xpathEl)) return xpathEl;
 
-        const candidates = Array.from(document.querySelectorAll('button, div[role="button"], div, li'));
+        const candidates = Array.from(document.querySelectorAll('button, [role="button"], div, li'));
         const pattern = new RegExp(`\\b${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
         const titleEl = candidates.find(el => {
             if (!isVisibleElement(el)) return false;
-            const text = (el.innerText || el.textContent || '').trim();
+            const text = getElementText(el);
             return pattern.test(text);
         });
         if (!titleEl) return null;
 
-        return titleEl.closest('button, div[role="button"], li, [class*="Card"], [class*="card"]') || titleEl;
+        return titleEl.closest('button, [role="button"], li, [class*="Card"], [class*="card"]') || titleEl;
+    }
+
+    function getArmCardState(el) {
+        if (!el) return '';
+        return [
+            el.className,
+            el.getAttribute && el.getAttribute('aria-selected'),
+            el.getAttribute && el.getAttribute('data-state'),
+            el.getAttribute && el.getAttribute('data-active')
+        ].filter(Boolean).join(' ').toLowerCase();
+    }
+
+    function isActiveArm(label) {
+        const xpath = label === 'Arena Arm'
+            ? CONFIG.armSwitchTask.arenaArmXPath
+            : CONFIG.armSwitchTask.trainingGoldArmXPath;
+        const armEl = findArmElement(label, xpath);
+        if (!armEl) return false;
+        const stateText = getArmCardState(armEl);
+        if (/(active|selected|current|true)/i.test(stateText)) return true;
+
+        const bodyText = document.body ? getElementText(document.body) : '';
+        return bodyText.includes(label) &&
+            (label === 'Arena Arm'
+                ? !bodyText.includes('Training Arm Gold')
+                : !bodyText.includes('Arena Arm'));
+    }
+
+    function isQueuedOnArm(label) {
+        const queueBtn = findBtn(CONFIG.text.queuing);
+        if (!queueBtn) return false;
+        const currentArm = Storage.getCurrentArm();
+        if (currentArm && currentArm === label) return true;
+        return isActiveArm(label);
+    }
+
+    function getGoldAttemptCount() {
+        return Storage.get() + Storage.getAnomalyCount();
     }
 
     function joinArm(label, xpath, attempt = 0, done = () => {}) {
+        if (isQueuedOnArm(label)) {
+            console.log(`[Stark HUD] 已在 ${label} 队列中，跳过重复入队`);
+            done(true);
+            return;
+        }
+
         const armEl = findArmElement(label, xpath);
         if (!armEl) {
             if (attempt < 20) {
@@ -2484,6 +2540,7 @@
                     joinArenaArm(0, (arenaClicked) => {
                         if (arenaClicked) {
                             Storage.markArmSwitchDone();
+                            Storage.setCurrentArm('Arena Arm');
                             updateUI('已切换到 Arena Arm', '--', '--', '#00ff99');
                         } else {
                             Storage.setArmSwitchInProgress(false);
@@ -2501,10 +2558,19 @@
 
     function switchToArenaArm(queueBtn) {
         if (state.armSwitchInProgress || Storage.isArmSwitchInProgress()) return;
+        if (isQueuedOnArm('Arena Arm')) {
+            Storage.markArmSwitchDone();
+            Storage.setArmSwitchInProgress(false);
+            state.armSwitchInProgress = false;
+            updateUI('已在 Arena Arm 队列中，跳过重复切换', '--', '--', '#00ff99');
+            console.log('[Stark HUD] 已在 Arena 队列中，不重复加入');
+            return;
+        }
         state.armSwitchInProgress = true;
         Storage.setArmSwitchInProgress(true);
-        updateUI('训练金臂已完成 6 次，切换 Arena Arm...', '--', '--', '#66ccff');
-        console.log('[Stark HUD] 开始切换到 Arena Arm');
+        const attempts = getGoldAttemptCount();
+        updateUI(`Gold 已尝试 ${attempts} 次，切换 Arena Arm...`, '--', '--', '#66ccff');
+        console.log(`[Stark HUD] 开始切换到 Arena Arm，Gold 尝试次数=${attempts}`);
 
         if (queueBtn) {
             try {
@@ -2522,13 +2588,24 @@
         const cfg = CONFIG.armSwitchTask;
         if (!cfg.enabled) return false;
         if (Storage.isArmSwitchDone() || Storage.isArmSwitchInProgress() || state.armSwitchInProgress) return false;
-        if (Storage.get() < cfg.successThreshold) return false;
+        if (getGoldAttemptCount() < cfg.successThreshold) return false;
         switchToArenaArm(queueBtn);
         return true;
     }
 
     function returnToTrainingGold(queueBtn) {
         const cfg = CONFIG.armSwitchTask;
+        if (isQueuedOnArm('Training Arm Gold')) {
+            Storage.setCount(0);
+            Storage.resetAnomaly();
+            Storage.clearArmSwitchDone();
+            Storage.setArmSwitchInProgress(false);
+            state.armSwitchInProgress = false;
+            state.morningRequeueActive = true;
+            updateUI('已在 Training Arm Gold 队列中，跳过重复切换', '--', '--', '#00ff99');
+            console.log('[Stark HUD] 已在 Gold 队列中，不重复加入');
+            return;
+        }
         updateUI('早八: 正在切回 Training Arm Gold...', '--', '--', '#66ccff');
         const switchGold = () => {
             const avatarClicked = clickXPath(cfg.robotAvatarXPath, '左侧机器人头像');
@@ -2537,7 +2614,8 @@
                     if (goldClicked) {
                         Storage.setCount(0);
                         Storage.resetAnomaly();
-                        localStorage.removeItem(STORAGE_KEYS.ARM_SWITCH_DONE);
+                        Storage.clearArmSwitchDone();
+                        Storage.setCurrentArm('Training Arm Gold');
                         Storage.setArmSwitchInProgress(false);
                         state.armSwitchInProgress = false;
                         state.morningRequeueActive = true;

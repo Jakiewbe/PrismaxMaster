@@ -17,11 +17,13 @@ var PX = PX || {};
     }
 
     function isVisibleElement(el) {
-        if (!el) return false;
-        const style = window.getComputedStyle(el);
-        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-        const rect = el.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
+        return PX.Utils && PX.Utils.isVisibleElement ? PX.Utils.isVisibleElement(el) : !!el;
+    }
+
+    function getElementText(el) {
+        return PX.Utils && PX.Utils.getElementText
+            ? PX.Utils.getElementText(el)
+            : ((el && (el.innerText || el.textContent)) || '').trim();
     }
 
     function clickXPath(xpath, label) {
@@ -43,10 +45,10 @@ var PX = PX || {};
     function findButtonNearElement(root, keywords) {
         if (!root) return null;
         const lowerKeywords = keywords.map(k => k.toLowerCase());
-        const candidates = Array.from(root.querySelectorAll('button, div[role="button"], span'));
+        const candidates = Array.from(root.querySelectorAll('button, [role="button"], span'));
         return candidates.find(el => {
             if (!isVisibleElement(el)) return false;
-            const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+            const text = getElementText(el).toLowerCase();
             return lowerKeywords.some(k => text.includes(k));
         });
     }
@@ -73,21 +75,65 @@ var PX = PX || {};
         const xpathEl = getElementByXPath(xpath);
         if (xpathEl && isVisibleElement(xpathEl)) return xpathEl;
 
-        const candidates = Array.from(document.querySelectorAll('button, div[role="button"], div, li'));
+        const candidates = Array.from(document.querySelectorAll('button, [role="button"], div, li'));
         const pattern = new RegExp(`\\b${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
         const titleEl = candidates.find(el => {
             if (!isVisibleElement(el)) return false;
-            const text = (el.innerText || el.textContent || '').trim();
+            const text = getElementText(el);
             return pattern.test(text);
         });
         if (!titleEl) return null;
 
-        return titleEl.closest('button, div[role="button"], li, [class*="Card"], [class*="card"]') || titleEl;
+        return titleEl.closest('button, [role="button"], li, [class*="Card"], [class*="card"]') || titleEl;
+    }
+
+    function getArmCardState(el) {
+        if (!el) return '';
+        return [
+            el.className,
+            el.getAttribute && el.getAttribute('aria-selected'),
+            el.getAttribute && el.getAttribute('data-state'),
+            el.getAttribute && el.getAttribute('data-active')
+        ].filter(Boolean).join(' ').toLowerCase();
+    }
+
+    function isActiveArm(label) {
+        const armEl = findArmElement(label, label === 'Arena Arm'
+            ? ((PX._config || {}).armSwitchTask || {}).arenaArmXPath
+            : ((PX._config || {}).armSwitchTask || {}).trainingGoldArmXPath);
+        if (!armEl) return false;
+        const stateText = getArmCardState(armEl);
+        if (/(active|selected|current|true)/i.test(stateText)) return true;
+
+        const bodyText = document.body ? getElementText(document.body) : '';
+        const hasOnlyTargetArm = bodyText.includes(label) &&
+            (label === 'Arena Arm'
+                ? !bodyText.includes('Training Arm Gold')
+                : !bodyText.includes('Arena Arm'));
+        return hasOnlyTargetArm;
+    }
+
+    function isQueuedOnArm(label, config) {
+        const queueBtn = PX.Automation ? PX.Automation.findBtn(config.text.queuing) : null;
+        if (!queueBtn) return false;
+        const currentArm = PX.Storage && PX.Storage.getCurrentArm ? PX.Storage.getCurrentArm() : '';
+        if (currentArm && currentArm === label) return true;
+        return isActiveArm(label);
+    }
+
+    function getGoldAttemptCount(storage) {
+        return storage.get() + storage.getAnomalyCount();
     }
 
     function joinArm(label, xpath, enterKeywords, config, attempt, done) {
         if (!attempt) attempt = 0;
         if (!done) done = function() {};
+
+        if (isQueuedOnArm(label, config)) {
+            console.log(`[ArmSwitch] 已在 ${label} 队列中，跳过重复入队`);
+            done(true);
+            return;
+        }
 
         const armEl = findArmElement(label, xpath);
         if (!armEl) {
@@ -138,9 +184,9 @@ var PX = PX || {};
     function hasLeaveQueueModal() {
         const confirmBtn = document.querySelector('button[class*="leaveModalConfirmBtn"], .QueuePanel_leaveModalConfirmBtn__ZtiIr');
         if (confirmBtn && isVisibleElement(confirmBtn)) return true;
-        const exactBtn = Array.from(document.querySelectorAll('button, div[role="button"]')).find(el => {
+        const exactBtn = Array.from(document.querySelectorAll('button, [role="button"]')).find(el => {
             if (!isVisibleElement(el)) return false;
-            const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+            const text = getElementText(el).toLowerCase();
             return text === 'leave queue';
         });
         return !!exactBtn;
@@ -150,9 +196,9 @@ var PX = PX || {};
         let confirmBtn = document.querySelector('button[class*="leaveModalConfirmBtn"], .QueuePanel_leaveModalConfirmBtn__ZtiIr');
         if (confirmBtn && !isVisibleElement(confirmBtn)) confirmBtn = null;
         if (!confirmBtn) {
-            confirmBtn = Array.from(document.querySelectorAll('button, div[role="button"]')).find(el => {
+            confirmBtn = Array.from(document.querySelectorAll('button, [role="button"]')).find(el => {
                 if (!isVisibleElement(el)) return false;
-                const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+                const text = getElementText(el).toLowerCase();
                 return text === 'leave queue';
             });
         }
@@ -254,6 +300,7 @@ var PX = PX || {};
                     joinArenaArm(config, 0, (arenaClicked) => {
                         if (arenaClicked) {
                             storage.markArmSwitchDone();
+                            if (storage.setCurrentArm) storage.setCurrentArm('Arena Arm');
                             PX.Panel.updateUI('已切换到 Arena Arm', '--', '--', '#00ff99', storage);
                         } else {
                             storage.setArmSwitchInProgress(false);
@@ -271,10 +318,19 @@ var PX = PX || {};
 
     function switchToArenaArm(queueBtn, config, storage) {
         if (PX._autoState.armSwitchInProgress || storage.isArmSwitchInProgress()) return;
+        if (isQueuedOnArm('Arena Arm', config)) {
+            storage.markArmSwitchDone();
+            storage.setArmSwitchInProgress(false);
+            PX._autoState.armSwitchInProgress = false;
+            PX.Panel.updateUI('已在 Arena Arm 队列中，跳过重复切换', '--', '--', '#00ff99', storage);
+            console.log('[ArmSwitch] 已在 Arena 队列中，不重复加入');
+            return;
+        }
         PX._autoState.armSwitchInProgress = true;
         storage.setArmSwitchInProgress(true);
-        PX.Panel.updateUI('训练金臂已完成 6 次，切换 Arena Arm...', '--', '--', '#66ccff', storage);
-        console.log('[ArmSwitch] 开始切换到 Arena Arm');
+        const attempts = getGoldAttemptCount(storage);
+        PX.Panel.updateUI(`Gold 已尝试 ${attempts} 次，切换 Arena Arm...`, '--', '--', '#66ccff', storage);
+        console.log(`[ArmSwitch] 开始切换到 Arena Arm，Gold 尝试次数=${attempts}`);
 
         if (queueBtn) {
             try { queueBtn.click(); } catch (e) {
@@ -290,13 +346,25 @@ var PX = PX || {};
         const cfg = config.armSwitchTask;
         if (!cfg.enabled) return false;
         if (storage.isArmSwitchDone() || storage.isArmSwitchInProgress() || PX._autoState.armSwitchInProgress) return false;
-        if (storage.get() < cfg.successThreshold) return false;
+        if (getGoldAttemptCount(storage) < cfg.successThreshold) return false;
         switchToArenaArm(queueBtn, config, storage);
         return true;
     }
 
     function returnToTrainingGold(queueBtn, config, storage, notifier) {
         const cfg = config.armSwitchTask;
+        if (isQueuedOnArm('Training Arm Gold', config)) {
+            storage.setCount(0);
+            storage.resetAnomaly();
+            if (storage.clearArmSwitchDone) storage.clearArmSwitchDone();
+            if (storage.setCurrentArm) storage.setCurrentArm('Training Arm Gold');
+            storage.setArmSwitchInProgress(false);
+            PX._autoState.armSwitchInProgress = false;
+            PX._autoState.morningRequeueActive = true;
+            PX.Panel.updateUI('已在 Training Arm Gold 队列中，跳过重复切换', '--', '--', '#00ff99', storage);
+            console.log('[ArmSwitch] 已在 Gold 队列中，不重复加入');
+            return;
+        }
         PX.Panel.updateUI('早八: 正在切回 Training Arm Gold...', '--', '--', '#66ccff', storage);
 
         const switchGold = () => {
@@ -306,6 +374,8 @@ var PX = PX || {};
                     if (goldClicked) {
                         storage.setCount(0);
                         storage.resetAnomaly();
+                        if (storage.clearArmSwitchDone) storage.clearArmSwitchDone();
+                        if (storage.setCurrentArm) storage.setCurrentArm('Training Arm Gold');
                         storage.setArmSwitchInProgress(false);
                         PX._autoState.armSwitchInProgress = false;
                         PX._autoState.morningRequeueActive = true;
@@ -356,6 +426,11 @@ var PX = PX || {};
             goldFound: !!gold,
             goldVisible: !!gold && isVisibleElement(gold),
             queueButtonFound: !!queueBtn,
+            activeArena: isActiveArm('Arena Arm'),
+            activeGold: isActiveArm('Training Arm Gold'),
+            queuedArena: isQueuedOnArm('Arena Arm', config),
+            queuedGold: isQueuedOnArm('Training Arm Gold', config),
+            goldAttempts: getGoldAttemptCount(storage),
             armSwitchDone: storage.isArmSwitchDone(),
             armSwitchInProgress: storage.isArmSwitchInProgress() || PX._autoState.armSwitchInProgress
         };
@@ -380,6 +455,9 @@ var PX = PX || {};
         switchToArenaArm: switchToArenaArm,
         maybeSwitchToArenaArm: maybeSwitchToArenaArm,
         returnToTrainingGold: returnToTrainingGold,
+        isActiveArm: isActiveArm,
+        isQueuedOnArm: isQueuedOnArm,
+        getGoldAttemptCount: getGoldAttemptCount,
         debugArenaArmSwitch: debugArenaArmSwitch
     };
 })();

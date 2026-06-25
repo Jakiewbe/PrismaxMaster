@@ -22,6 +22,7 @@ var PX = PX || {};
         COMMENT_START_TIME: 'commentStartTime',
         ARM_SWITCH_DONE: 'armSwitchDone',
         ARM_SWITCH_IN_PROGRESS: 'armSwitchInProgress',
+        CURRENT_ARM: 'currentArm',
         MORNING_DONE: 'morningDone',
         MORNING_PRERELOAD: 'morningPrereload',
         PANEL_POS_X: 'panelPosX',
@@ -225,12 +226,22 @@ var PX = PX || {};
         },
         async markArmSwitchDone() {
             await setAsync(KEYS.ARM_SWITCH_DONE, '1');
+            await setAsync(KEYS.ARM_SWITCH_IN_PROGRESS, '0');
+        },
+        async clearArmSwitchDone() {
+            await setAsync(KEYS.ARM_SWITCH_DONE, '0');
         },
         isArmSwitchInProgress() {
             return getSync(KEYS.ARM_SWITCH_IN_PROGRESS) === '1';
         },
         async setArmSwitchInProgress(v) {
             await setAsync(KEYS.ARM_SWITCH_IN_PROGRESS, v ? '1' : '0');
+        },
+        getCurrentArm() {
+            return getSync(KEYS.CURRENT_ARM) || '';
+        },
+        async setCurrentArm(v) {
+            await setAsync(KEYS.CURRENT_ARM, v || '');
         },
 
         // --- Morning Done ---
