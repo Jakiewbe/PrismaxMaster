@@ -11,21 +11,40 @@ var PX = PX || {};
     // DOM Utility Functions
     // ============================================================
 
+    function getElementText(el) {
+        return [
+            el.innerText,
+            el.textContent,
+            el.getAttribute && el.getAttribute('aria-label'),
+            el.getAttribute && el.getAttribute('title'),
+            el.getAttribute && el.getAttribute('value')
+        ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    }
+
+    function toActionElement(el) {
+        if (!el) return null;
+        return el.closest && el.closest('button, [role="button"], input[type="button"], input[type="submit"]') || el;
+    }
+
     function findBtn(keywords, blacklist) {
         const bl = blacklist || (PX._config && PX._config.text ? PX._config.text.blacklist : []);
         const enterKeys = PX._config && PX._config.text ? PX._config.text.enter : [];
-        const candidates = Array.from(document.querySelectorAll('button, div[role="button"], span'));
-        return candidates.find(el => {
-            if (!el.offsetParent) return false;
-            if (el.tagName === 'A' || el.closest('a')) return false;
-            const txt = el.innerText.trim();
-            if (!txt) return false;
-            if (bl.some(bad => txt.includes(bad))) return false;
+        const candidates = Array.from(document.querySelectorAll(
+            'button, [role="button"], input[type="button"], input[type="submit"], span'
+        ));
+        for (const el of candidates) {
+            const actionEl = toActionElement(el);
+            if (!isVisibleElement(actionEl)) continue;
+            if (actionEl.tagName === 'A' || actionEl.closest('a')) continue;
+            const txt = getElementText(actionEl);
+            if (!txt) continue;
+            if (bl.some(bad => txt.includes(bad))) continue;
             const lower = txt.toLowerCase();
             const isMatch = keywords.some(k => lower.includes(k.toLowerCase()));
-            if (isMatch && keywords === enterKeys && lower.includes("leave")) return false;
-            return isMatch;
-        });
+            if (isMatch && keywords === enterKeys && lower.includes("leave")) continue;
+            if (isMatch) return actionEl;
+        }
+        return null;
     }
 
     function isVisibleElement(el) {
@@ -57,6 +76,10 @@ var PX = PX || {};
         // Pattern 4: "Waiting: X"
         const m4 = text.match(/Waiting[:\s]+(\d{1,4})/i);
         if (m4) return parseInt(m4[1], 10) - 1;
+        // Pattern 5: "Rank #X" / "#X in queue"
+        const m5 = text.match(/(?:Rank|Queue\s*Position)\D{0,10}#?\s*(\d{1,4})/i) ||
+            text.match(/#\s*(\d{1,4})\s*(?:in\s+queue|queued)/i);
+        if (m5) return parseInt(m5[1], 10) - 1;
         return null;
     }
 

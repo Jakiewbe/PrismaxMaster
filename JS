@@ -448,10 +448,19 @@
         }
 
         function findButton(keywords) {
-            const candidates = Array.from(document.querySelectorAll('button, div[role="button"]'));
+            const candidates = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'));
             return candidates.find(el => {
-                if (!el.offsetParent) return false;
-                const text = el.innerText || el.textContent || '';
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                if (rect.width <= 0 || rect.height <= 0) return false;
+                const text = [
+                    el.innerText,
+                    el.textContent,
+                    el.getAttribute('aria-label'),
+                    el.getAttribute('title'),
+                    el.getAttribute('value')
+                ].filter(Boolean).join(' ');
                 return keywords.some(k => text.includes(k));
             });
         }
@@ -522,9 +531,9 @@
         }
 
         function detectPageState() {
-            const endBtn = findButton(['End Tele-Operation', 'End Session']);
-            const queueBtn = findButton(['Leave', 'Waiting', 'Position', 'Queued']);
-            const enterBtn = findButton(['Enter', 'Start', 'Join']);
+            const endBtn = findButton(['End Tele-Operation', 'End Session', 'End Control', 'Stop Validating']);
+            const queueBtn = findButton(['Leave', 'Leave Queue', 'Waiting', 'Position', 'Queued', 'In Queue']);
+            const enterBtn = findButton(['Enter Live Control', 'Join Queue', 'Enter Pool', 'Begin Validating', 'Start Validating', 'Control Now']);
 
             const oldState = {
                 isOperating: state.isOperating,
@@ -563,6 +572,12 @@
 
                 if (!rank) {
                     rankMatch = pageText.match(/Queue[:\s]+(\d{1,4})/i);
+                    rank = rankMatch ? parseInt(rankMatch[1], 10) : null;
+                }
+
+                if (!rank) {
+                    rankMatch = pageText.match(/(?:Rank|Queue\s*Position)\D{0,10}#?\s*(\d{1,4})/i) ||
+                        pageText.match(/#\s*(\d{1,4})\s*(?:in\s+queue|queued)/i);
                     rank = rankMatch ? parseInt(rankMatch[1], 10) : null;
                 }
 
@@ -1220,9 +1235,9 @@
         },
 
         text: {
-            enter: ["Enter Live Control", "Join Queue", "Enter Pool"],
-            end: ["End Tele-Operation", "End Session"],
-            queuing: ["Leave", "Waiting", "Position", "Queued"],
+            enter: ["Enter Live Control", "Join Queue", "Enter Pool", "Begin Validating", "Start Validating", "Control Now"],
+            end: ["End Tele-Operation", "End Session", "End Control", "Stop Validating"],
+            queuing: ["Leave", "Leave Queue", "Waiting", "Position", "Queued", "In Queue"],
             liveChat: ["Live Chat", "Open Live Chat"],
             queue: ["Queue"],
             blacklist: ["Discord", "Twitter", "Telegram", "Docs", "Whitepaper", "Log", "Sign"]
@@ -1872,7 +1887,10 @@
             
             // 🆕 使用 React 兼容的方式设置值
             // 获取原生的 value setter
-            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            const proto = input instanceof HTMLTextAreaElement
+                ? window.HTMLTextAreaElement.prototype
+                : window.HTMLInputElement.prototype;
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(proto, 'value').set;
             nativeInputValueSetter.call(input, comment);
             
             // 触发 React 的 onChange 事件
@@ -2211,6 +2229,9 @@
         if (m) return parseInt(m[1], 10);
         const m2 = text.match(/There'?s\s+(\d{1,4})\s+users?\s+in\s+front\s+of\s+you/i);
         if (m2) return parseInt(m2[1], 10);
+        const m3 = text.match(/(?:Rank|Queue\s*Position)\D{0,10}#?\s*(\d{1,4})/i) ||
+            text.match(/#\s*(\d{1,4})\s*(?:in\s+queue|queued)/i);
+        if (m3) return parseInt(m3[1], 10);
         return null;
     }
 
@@ -2221,18 +2242,28 @@
     }
 
     function findBtn(keywords) {
-        const candidates = Array.from(document.querySelectorAll('button, div[role="button"], span'));
-        return candidates.find(el => {
-            if (!el.offsetParent) return false;
-            if (el.tagName === 'A' || el.closest('a')) return false;
-            const txt = el.innerText.trim();
-            if (!txt) return false;
-            if (CONFIG.text.blacklist.some(bad => txt.includes(bad))) return false;
+        const candidates = Array.from(document.querySelectorAll(
+            'button, [role="button"], input[type="button"], input[type="submit"], span'
+        ));
+        for (const el of candidates) {
+            const actionEl = el.closest && el.closest('button, [role="button"], input[type="button"], input[type="submit"]') || el;
+            if (!isVisibleElement(actionEl)) continue;
+            if (actionEl.tagName === 'A' || actionEl.closest('a')) continue;
+            const txt = [
+                actionEl.innerText,
+                actionEl.textContent,
+                actionEl.getAttribute && actionEl.getAttribute('aria-label'),
+                actionEl.getAttribute && actionEl.getAttribute('title'),
+                actionEl.getAttribute && actionEl.getAttribute('value')
+            ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+            if (!txt) continue;
+            if (CONFIG.text.blacklist.some(bad => txt.includes(bad))) continue;
             const lower = txt.toLowerCase();
             const isMatch = keywords.some(k => lower.includes(k.toLowerCase()));
-            if (isMatch && keywords === CONFIG.text.enter && lower.includes("leave")) return false;
-            return isMatch;
-        });
+            if (isMatch && keywords === CONFIG.text.enter && lower.includes("leave")) continue;
+            if (isMatch) return actionEl;
+        }
+        return null;
     }
 
     function isVisibleElement(el) {

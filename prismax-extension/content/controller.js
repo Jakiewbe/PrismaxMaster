@@ -50,10 +50,19 @@ var PX = PX || {};
         }
 
         function findButton(keywords) {
-            const candidates = Array.from(document.querySelectorAll('button, div[role="button"]'));
+            const candidates = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'));
             return candidates.find(el => {
-                if (!el.offsetParent) return false;
-                const text = el.innerText || el.textContent || '';
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                if (rect.width <= 0 || rect.height <= 0) return false;
+                const text = [
+                    el.innerText,
+                    el.textContent,
+                    el.getAttribute('aria-label'),
+                    el.getAttribute('title'),
+                    el.getAttribute('value')
+                ].filter(Boolean).join(' ');
                 return keywords.some(k => text.includes(k));
             });
         }
@@ -124,9 +133,9 @@ var PX = PX || {};
         }
 
         function detectPageState() {
-            const endBtn = findButton(['End Tele-Operation', 'End Session']);
-            const queueBtn = findButton(['Leave', 'Waiting', 'Position', 'Queued']);
-            const enterBtn = findButton(['Enter', 'Start', 'Join']);
+            const endBtn = findButton(['End Tele-Operation', 'End Session', 'End Control', 'Stop Validating']);
+            const queueBtn = findButton(['Leave', 'Leave Queue', 'Waiting', 'Position', 'Queued', 'In Queue']);
+            const enterBtn = findButton(['Enter Live Control', 'Join Queue', 'Enter Pool', 'Begin Validating', 'Start Validating', 'Control Now']);
 
             const oldState = {
                 isOperating: state.isOperating,
@@ -165,6 +174,12 @@ var PX = PX || {};
 
                 if (!rank) {
                     rankMatch = pageText.match(/Queue[:\s]+(\d{1,4})/i);
+                    rank = rankMatch ? parseInt(rankMatch[1], 10) : null;
+                }
+
+                if (!rank) {
+                    rankMatch = pageText.match(/(?:Rank|Queue\s*Position)\D{0,10}#?\s*(\d{1,4})/i) ||
+                        pageText.match(/#\s*(\d{1,4})\s*(?:in\s+queue|queued)/i);
                     rank = rankMatch ? parseInt(rankMatch[1], 10) : null;
                 }
 

@@ -105,9 +105,10 @@ var PX = PX || {};
             // React-compatible input
             input.focus();
 
-            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-                window.HTMLInputElement.prototype, 'value'
-            ).set;
+            const proto = input instanceof HTMLTextAreaElement
+                ? window.HTMLTextAreaElement.prototype
+                : window.HTMLInputElement.prototype;
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(proto, 'value').set;
             nativeInputValueSetter.call(input, comment);
 
             const inputEvent = new Event('input', { bubbles: true });

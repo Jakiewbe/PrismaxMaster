@@ -130,9 +130,9 @@ function collectConfig() {
             },
 
             text: {
-                enter: ["Enter Live Control", "Join Queue", "Enter Pool"],
-                end: ["End Tele-Operation", "End Session"],
-                queuing: ["Leave", "Waiting", "Position", "Queued"],
+                enter: ["Enter Live Control", "Join Queue", "Enter Pool", "Begin Validating", "Start Validating", "Control Now"],
+                end: ["End Tele-Operation", "End Session", "End Control", "Stop Validating"],
+                queuing: ["Leave", "Leave Queue", "Waiting", "Position", "Queued", "In Queue"],
                 liveChat: ["Live Chat", "Open Live Chat"],
                 queue: ["Queue"],
                 blacklist: ["Discord", "Twitter", "Telegram", "Docs", "Whitepaper", "Log", "Sign"]
