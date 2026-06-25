@@ -17,7 +17,53 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "processed_registry_path": "data/logs/processed_episodes.json",
         "local_video_dir": "data/videos",
     },
-    "scorer": {"version": "v0.1.0"},
+    "scorer": {"version": "v0.2.0"},
+    "browser": {
+        "urls": {
+            "dashboard": "https://app.prismax.ai/",
+            "review_list": "https://app.prismax.ai/data/review",
+            "review_detail_pattern": "https://app.prismax.ai/data/review/{task_id}?upload={upload_id}",
+        },
+        "selectors": {
+            "begin_validating_button": "button:has-text('Begin Validating')",
+            "review_earn_button": "button:has-text('Review & Earn')",
+            "submit_button": ".DataQAReview_submitBtn__I7VB7",
+            "scenario_trigger": ".DataQAReview_scenarioTrigger__qCwVC",
+            "breadcrumb": ".DataQAReview_breadcrumbLink__uMtJZ",
+            "playback_speed": ".DataQAReview_ctrlSpeed__G1Whv",
+            "validation_rules_link": ".DataQAReview_valLink__Od5GV",
+            "quality_ranges": "input[type='range']",
+            "videos": "video",
+        },
+        "text_patterns": {"episode_id": r"Episode #(\d+)", "progress": r"(\d+) of (\d+)"},
+    },
+    "form": {
+        "pass_fail_items": {
+            "clear_camera_feed": {
+                "label": "Clear camera feed",
+                "fail_modes": ["black_frame", "brightness", "blur", "camera_feed", "required_view_missing", "video_error"],
+            },
+            "task_completed_as_instructed": {
+                "label": "Task completed as instructed",
+                "fail_modes": ["task_not_completed", "task_mismatch", "failure_detected", "low_pass_probability"],
+            },
+            "robot_hand_stays_in_frame": {
+                "label": "Robot hand stays in frame",
+                "fail_modes": ["hand_out_of_frame", "robot_hand", "optional_view_missing"],
+            },
+            "all_cameras_in_sync": {
+                "label": "All cameras in sync",
+                "fail_modes": ["camera_sync", "sync", "freeze_ratio"],
+            },
+        },
+        "quality_sliders": {
+            "quality": {"label": "Robot control quality", "order": 0},
+            "smoothness": {"label": "Movement smoothness", "order": 1},
+            "speed": {"label": "Task completion speed", "order": 2},
+            "completion": {"label": "Task fully completed", "order": 3},
+        },
+        "slider_labels": {1: "Poor", 2: "Weak", 3: "OK", 4: "Good", 5: "Exc"},
+    },
     "views": {
         "main": {"required": True, "role": "global", "hard_fail_if_missing": True},
         "left_wrist": {"required": False, "role": "manipulator"},
@@ -56,8 +102,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "include_long_idle_edges": True,
     },
     "default_scores": {
-        "hard_fail": {"speed": 1, "smoothness": 1, "quality": 1, "diversity": 3, "completion": 1},
-        "uncertain": {"speed": 3, "smoothness": 3, "quality": 3, "diversity": 3, "completion": 3},
+        "hard_fail": {"speed": 1, "smoothness": 1, "quality": 1, "completion": 1},
+        "uncertain": {"speed": 3, "smoothness": 3, "quality": 3, "completion": 3},
     },
 }
 
@@ -98,4 +144,3 @@ def resolve_data_path(path: str | Path) -> Path:
     if path_obj.is_absolute():
         return path_obj
     return Path(__file__).resolve().parent / path_obj
-

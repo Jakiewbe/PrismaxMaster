@@ -39,6 +39,7 @@ def build_log_record(
             "scores": result.get("scores"),
             "pass_probability": result.get("pass_probability"),
         },
+        "form_plan": result.get("form_plan", {}),
         "control": control_record,
         "error": result.get("error"),
     }
@@ -127,4 +128,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -12,7 +12,7 @@ class PrismaXScorer:
     def __init__(self, config: dict[str, Any], config_hash: str):
         self.config = config
         self.config_hash = config_hash
-        self.version = config.get("scorer", {}).get("version", "v0.1.0")
+        self.version = config.get("scorer", {}).get("version", "v0.2.0")
         self.vlm = VLMClient(config)
 
     def score_episode(self, episode: dict[str, Any]) -> dict[str, Any]:
@@ -274,7 +274,6 @@ class PrismaXScorer:
             "speed": score_100_to_slider(vlm["speed_score"]),
             "smoothness": score_100_to_slider(vlm["smoothness_score"]),
             "quality": score_100_to_slider(vlm["final_state_score"]),
-            "diversity": score_100_to_slider(vlm["diversity_score"]),
             "completion": score_100_to_slider(vlm["completion_score"]),
         }
         vlm_log = {"used": True, "model": self.vlm.model_name, "prompt_version": self.vlm.prompt_version, "raw_output": vlm}
@@ -341,6 +340,14 @@ class PrismaXScorer:
             "failure_modes": failure_modes or [],
             "pass_probability": pass_probability,
             "vlm_used": bool(vlm and vlm.get("used")),
+            "form_plan": self._build_form_plan(
+                decision,
+                scores or self.config["default_scores"]["uncertain"],
+                hard_fail_reasons,
+                suspicious_reasons,
+                failure_modes or [],
+                pass_probability,
+            ),
             "features": features,
             "rules": {
                 "hard_fail_reasons": hard_fail_reasons,
@@ -352,3 +359,72 @@ class PrismaXScorer:
             "error": error,
         }
 
+    def _build_form_plan(
+        self,
+        decision: str,
+        scores: dict[str, int],
+        hard_fail_reasons: list[str],
+        suspicious_reasons: list[str],
+        failure_modes: list[str],
+        pass_probability: float | None,
+    ) -> dict[str, Any]:
+        form_cfg = self.config.get("form", {})
+        selectors = self.config.get("browser", {}).get("selectors", {})
+        pass_fail_items = form_cfg.get("pass_fail_items", {})
+        slider_cfg = form_cfg.get("quality_sliders", {})
+        slider_labels = form_cfg.get("slider_labels", {})
+
+        all_reasons = hard_fail_reasons + suspicious_reasons + failure_modes
+        normalized_reasons = [str(reason).lower() for reason in all_reasons]
+        checks: dict[str, Any] = {}
+
+        for key, item in pass_fail_items.items():
+            value = None
+            matched: list[str] = []
+            if decision == "PASS":
+                value = True
+            elif decision == "FAIL":
+                fail_modes = [str(mode).lower() for mode in item.get("fail_modes", [])]
+                for mode in fail_modes:
+                    if any(mode in reason for reason in normalized_reasons):
+                        matched.append(mode)
+                value = False if matched else True
+            checks[key] = {
+                "label": item.get("label", key),
+                "value": value,
+                "matched_fail_modes": sorted(set(matched)),
+            }
+
+        if decision == "FAIL" and checks and all(item["value"] is True for item in checks.values()):
+            first_key = next(iter(checks))
+            checks[first_key]["value"] = False
+            checks[first_key]["matched_fail_modes"] = ["generic_fail"]
+
+        sliders: dict[str, Any] = {}
+        for score_key, cfg in slider_cfg.items():
+            value = int(scores.get(score_key, 3))
+            value = max(1, min(5, value))
+            sliders[score_key] = {
+                "label": cfg.get("label", score_key),
+                "order": cfg.get("order"),
+                "value": value,
+                "level": slider_labels.get(value, str(value)),
+            }
+
+        gate_score = None
+        if pass_probability is not None:
+            gate_score = round(max(0.0, min(1.0, float(pass_probability))) * 100)
+        elif decision == "PASS":
+            gate_score = 100
+        elif decision == "FAIL":
+            gate_score = 0
+
+        return {
+            "can_fill": decision in {"PASS", "FAIL"},
+            "can_submit": decision in {"PASS", "FAIL"},
+            "submit_selector": selectors.get("submit_button"),
+            "quality_range_selector": selectors.get("quality_ranges"),
+            "pass_fail_checks": checks,
+            "quality_sliders": sliders,
+            "gate_score": gate_score,
+        }

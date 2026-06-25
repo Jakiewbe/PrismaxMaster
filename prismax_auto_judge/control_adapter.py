@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
+from urllib.parse import parse_qs, urlparse
 from typing import Any, Iterator
 
 from video_features import VIDEO_EXTENSIONS
@@ -41,6 +43,28 @@ class PrismaXControlAdapter:
         raise RuntimeError(f"submit_aborted:{reason}")
 
 
+def parse_review_url(url: str) -> dict[str, str | None]:
+    parsed = urlparse(url)
+    upload_id = parse_qs(parsed.query).get("upload", [None])[0]
+    task_id = None
+    match = re.search(r"/data/review/([^/?#]+)", parsed.path)
+    if match:
+        task_id = match.group(1)
+    return {"task_id": task_id, "upload_id": upload_id}
+
+
+def parse_episode_id(page_text: str, pattern: str = r"Episode #(\d+)") -> str | None:
+    match = re.search(pattern, page_text)
+    return match.group(1) if match else None
+
+
+def parse_review_progress(page_text: str, pattern: str = r"(\d+) of (\d+)") -> dict[str, int] | None:
+    match = re.search(pattern, page_text)
+    if not match:
+        return None
+    return {"current": int(match.group(1)), "total": int(match.group(2))}
+
+
 def iter_local_episodes(video_dir: str | Path) -> Iterator[dict[str, Any]]:
     root = Path(video_dir)
     if not root.exists():
@@ -67,4 +91,3 @@ def iter_local_episodes(video_dir: str | Path) -> Iterator[dict[str, Any]]:
             "video_paths": paths,
             "metadata": {"source": "local_folder"},
         }
-
