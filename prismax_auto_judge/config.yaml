@@ -10,7 +10,7 @@ runtime:
 daily_workflow:
   enabled: true
   control_first: true
-  min_control_operations_before_vla: 1
+  min_control_operations_before_vla: 0
   min_labels_per_day: 2
   max_labels_per_day: 4
   daily_counts_path: "data/logs/vla_daily_counts.json"
@@ -26,21 +26,20 @@ playback:
   segment_gap_seconds: 1.5       # pause between segments (simulates human switching)
 
 scorer:
-  version: "v0.4.0"  # +playback simulation +segment polling +timeline anomaly detection
+  version: "v0.5.0"  # +form-native VLM output +multi-view +per-field justifications
 
 vlm:
-  enabled: false
+  enabled: true
   export_requests: true
   request_dir: "data/logs/vlm_requests"
   prompt_template: "vlm_prompts/prismax_vla_v1.txt"
   prompt_version: "prismax_vla_v1"
-  provider: "manual"
-  model: null
+  provider: "xiaomi_compatible"
+  model: "mimo-v2.5"
   timeout_seconds: 90
   max_retries: 2
   temperature: 0.0
   max_images: 20
-  allow_text_only_primary: false
   response_dir: "data/logs/vlm_responses"
   provider_profiles:
     openai_compatible:
@@ -55,9 +54,9 @@ vlm:
       text_only: true
       response_format_json: true
     xiaomi_compatible:
-      base_url: ""
+      base_url: "https://api.xiaomimimo.com/v1/chat/completions"
       api_key_env: "XIAOMI_API_KEY"
-      model: ""
+      model: "mimo-v2.5"
       response_format_json: true
 
 browser:

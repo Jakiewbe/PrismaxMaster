@@ -54,20 +54,8 @@ class PrismaXScorer:
                     scores=self.config["default_scores"]["hard_fail"],
                 )
 
-            if suspicious_reasons:
-                return self._result(
-                    episode_id,
-                    "UNCERTAIN",
-                    False,
-                    0.45,
-                    "medium",
-                    "Suspicious visual signals require semantic review.",
-                    features,
-                    hard_fail_reasons,
-                    suspicious_reasons,
-                    triggered_thresholds,
-                    frames=frames,
-                )
+            # Suspicious signals no longer short-circuit — they feed into VLM context.
+            # The VLM sees both the frames AND the CV flags, so it can cross-check.
 
             vlm_raw = self.vlm.judge_episode(
                 task_prompt=str(episode.get("task_prompt", "")),
@@ -276,20 +264,28 @@ class PrismaXScorer:
         thresholds = self.config["decision_thresholds"]
         pass_probability = float(vlm["pass_probability"])
         confidence = float(vlm["confidence"])
+
+        # v2 form-native: VLM directly emits 1-5 sliders + boolean checks
         scores = {
-            "speed": score_100_to_slider(vlm["speed_score"]),
-            "smoothness": score_100_to_slider(vlm["smoothness_score"]),
-            "quality": score_100_to_slider(vlm["final_state_score"]),
-            "completion": score_100_to_slider(vlm["completion_score"]),
+            "speed": int(vlm.get("task_completion_speed", 3)),
+            "smoothness": int(vlm.get("movement_smoothness", 3)),
+            "quality": int(vlm.get("robot_control_quality", 3)),
+            "completion": int(vlm.get("task_fully_completed", 3)),
         }
+
+        all_checks_pass = (
+            vlm.get("clear_camera_feed", False) is True
+            and vlm.get("task_completed_as_instructed", False) is True
+            and vlm.get("robot_hand_stays_in_frame", False) is True
+            and vlm.get("all_cameras_in_sync", False) is True
+        )
+
         vlm_log = {"used": True, "provider": self.vlm.provider, "model": self.vlm.model_name, "prompt_version": self.vlm.prompt_version, "request_path": self.vlm.last_request_path, "response_path": self.vlm.last_response_path, "raw_output": vlm}
 
         if (
             pass_probability >= thresholds["auto_pass_min_probability"]
             and confidence >= thresholds["min_confidence_submit"]
-            and vlm["task_matches_prompt"] is True
-            and vlm["failure_detected"] is False
-            and vlm["destructive_action"] is False
+            and all_checks_pass
         ):
             return self._result(
                 episode_id, "PASS", True, confidence, "low", vlm["reason"], features,
@@ -298,9 +294,8 @@ class PrismaXScorer:
             )
 
         if (
-            (pass_probability <= thresholds["auto_fail_max_probability"] and confidence >= thresholds["min_confidence_submit"])
-            or vlm["task_matches_prompt"] is False
-            or vlm["destructive_action"] is True
+            pass_probability <= thresholds["auto_fail_max_probability"]
+            and confidence >= thresholds["min_confidence_submit"]
         ):
             return self._result(
                 episode_id, "FAIL", True, confidence, "low", vlm["reason"], features,

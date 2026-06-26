@@ -93,22 +93,19 @@ class VLMClient:
     @staticmethod
     def expected_response_schema() -> dict[str, str]:
         return {
-            "task_matches_prompt": "boolean",
-            "task_success_score": "0-100 number",
-            "completion_score": "0-100 number",
-            "final_state_score": "0-100 number",
-            "trajectory_clarity_score": "0-100 number",
-            "smoothness_score": "0-100 number",
-            "speed_score": "0-100 number",
-            "diversity_score": "0-100 number",
-            "no_damage_score": "0-100 number",
-            "failure_detected": "boolean",
+            "clear_camera_feed": "boolean",
+            "task_completed_as_instructed": "boolean",
+            "robot_hand_stays_in_frame": "boolean",
+            "all_cameras_in_sync": "boolean",
+            "robot_control_quality": "1-5 integer",
+            "movement_smoothness": "1-5 integer",
+            "task_completion_speed": "1-5 integer",
+            "task_fully_completed": "1-5 integer",
             "failure_modes": "list[str]",
-            "destructive_action": "boolean",
-            "long_stuck_or_struggle": "boolean",
             "pass_probability": "0.0-1.0 number",
             "confidence": "0.0-1.0 number",
-            "reason": "one sentence",
+            "reason": "one-sentence summary",
+            "justifications": "dict[str,str]",
         }
 
     def render_prompt(self, task_prompt: str, frame_count: int, aggregate_features: dict[str, float]) -> str:

@@ -35,7 +35,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "simulate_delay": True,
         "segment_gap_seconds": 1.5,
     },
-    "scorer": {"version": "v0.4.0"},
+    "scorer": {"version": "v0.5.0"},
     "vlm": {
         "enabled": False,
         "export_requests": True,

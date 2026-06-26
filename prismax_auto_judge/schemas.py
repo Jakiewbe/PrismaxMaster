@@ -3,20 +3,17 @@ from __future__ import annotations
 from typing import Any
 
 
+# v2: form-native output — VLM directly emits form values (no conversion needed)
 VLM_REQUIRED_FIELDS = {
-    "task_matches_prompt",
-    "task_success_score",
-    "completion_score",
-    "final_state_score",
-    "trajectory_clarity_score",
-    "smoothness_score",
-    "speed_score",
-    "diversity_score",
-    "no_damage_score",
-    "failure_detected",
+    "clear_camera_feed",
+    "task_completed_as_instructed",
+    "robot_hand_stays_in_frame",
+    "all_cameras_in_sync",
+    "robot_control_quality",
+    "movement_smoothness",
+    "task_completion_speed",
+    "task_fully_completed",
     "failure_modes",
-    "destructive_action",
-    "long_stuck_or_struggle",
     "pass_probability",
     "confidence",
     "reason",
@@ -32,28 +29,22 @@ def validate_vlm_output(raw: Any) -> tuple[bool, dict[str, Any] | None, list[str
     if missing:
         errors.append("missing_fields:" + ",".join(missing))
 
-    for name in [
-        "task_success_score",
-        "completion_score",
-        "final_state_score",
-        "trajectory_clarity_score",
-        "smoothness_score",
-        "speed_score",
-        "diversity_score",
-        "no_damage_score",
-    ]:
+    # PASS/FAIL checks (4 booleans)
+    for name in ["clear_camera_feed", "task_completed_as_instructed", "robot_hand_stays_in_frame", "all_cameras_in_sync"]:
+        if name in raw and not isinstance(raw.get(name), bool):
+            errors.append(f"{name}_not_bool")
+
+    # Quality ratings (4 ints, 1-5)
+    for name in ["robot_control_quality", "movement_smoothness", "task_completion_speed", "task_fully_completed"]:
         value = raw.get(name)
-        if not isinstance(value, (int, float)) or not 0 <= value <= 100:
+        if not isinstance(value, (int, float)) or not 1 <= value <= 5:
             errors.append(f"{name}_out_of_range")
 
+    # Prob/confidence (0.0-1.0)
     for name in ["pass_probability", "confidence"]:
         value = raw.get(name)
         if not isinstance(value, (int, float)) or not 0 <= value <= 1:
             errors.append(f"{name}_out_of_range")
-
-    for name in ["task_matches_prompt", "failure_detected", "destructive_action", "long_stuck_or_struggle"]:
-        if not isinstance(raw.get(name), bool):
-            errors.append(f"{name}_not_bool")
 
     if not isinstance(raw.get("failure_modes"), list):
         errors.append("failure_modes_not_list")
@@ -67,6 +58,7 @@ def validate_vlm_output(raw: Any) -> tuple[bool, dict[str, Any] | None, list[str
 
 
 def score_100_to_slider(value: int | float) -> int:
+    """Legacy: convert 0-100 score to 1-5 slider. Keep for backward compat."""
     if value >= 85:
         return 5
     if value >= 70:
