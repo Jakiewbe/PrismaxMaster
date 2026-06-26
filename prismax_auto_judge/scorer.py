@@ -73,6 +73,8 @@ class PrismaXScorer:
                 task_prompt=str(episode.get("task_prompt", "")),
                 frame_paths=frames,
                 video_paths=episode.get("video_paths") or {},
+                features=features,
+                episode_id=episode_id,
             )
             if vlm_raw is None:
                 return self._result(
@@ -280,7 +282,7 @@ class PrismaXScorer:
             "quality": score_100_to_slider(vlm["final_state_score"]),
             "completion": score_100_to_slider(vlm["completion_score"]),
         }
-        vlm_log = {"used": True, "model": self.vlm.model_name, "prompt_version": self.vlm.prompt_version, "raw_output": vlm}
+        vlm_log = {"used": True, "provider": self.vlm.provider, "model": self.vlm.model_name, "prompt_version": self.vlm.prompt_version, "request_path": self.vlm.last_request_path, "response_path": self.vlm.last_response_path, "raw_output": vlm}
 
         if (
             pass_probability >= thresholds["auto_pass_min_probability"]
@@ -436,3 +438,5 @@ class PrismaXScorer:
             "quality_sliders": sliders,
             "gate_score": gate_score,
         }
+
+

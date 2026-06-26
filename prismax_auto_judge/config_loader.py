@@ -17,6 +17,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "processed_registry_path": "data/logs/processed_episodes.json",
         "local_video_dir": "data/videos",
     },
+    "daily_workflow": {
+        "enabled": True,
+        "control_first": True,
+        "min_control_operations_before_vla": 1,
+        "min_labels_per_day": 2,
+        "max_labels_per_day": 4,
+        "daily_counts_path": "data/logs/vla_daily_counts.json",
+        "control_state_file": "../prismax_state.json",
+        "block_if_control_state_missing": False,
+        "api_keys_location": "python_env_only",
+    },
     "playback": {
         "enabled": True,
         "speed_multiplier": 10.0,
@@ -24,7 +35,43 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "simulate_delay": True,
         "segment_gap_seconds": 1.5,
     },
-    "scorer": {"version": "v0.3.0"},
+    "scorer": {"version": "v0.4.0"},
+    "vlm": {
+        "enabled": False,
+        "export_requests": True,
+        "request_dir": "data/logs/vlm_requests",
+        "prompt_template": "vlm_prompts/prismax_vla_v1.txt",
+        "prompt_version": "prismax_vla_v1",
+        "provider": "manual",
+        "model": None,
+        "timeout_seconds": 90,
+        "max_retries": 2,
+        "temperature": 0.0,
+        "max_images": 20,
+        "allow_text_only_primary": False,
+        "response_dir": "data/logs/vlm_responses",
+        "provider_profiles": {
+            "openai_compatible": {
+                "base_url": "https://api.openai.com/v1/chat/completions",
+                "api_key_env": "OPENAI_API_KEY",
+                "model": "gpt-4o-mini",
+                "response_format_json": True,
+            },
+            "deepseek_text": {
+                "base_url": "https://api.deepseek.com/chat/completions",
+                "api_key_env": "DEEPSEEK_API_KEY",
+                "model": "deepseek-chat",
+                "text_only": True,
+                "response_format_json": True,
+            },
+            "xiaomi_compatible": {
+                "base_url": "",
+                "api_key_env": "XIAOMI_API_KEY",
+                "model": "",
+                "response_format_json": True,
+            },
+        },
+    },
     "browser": {
         "urls": {
             "dashboard": "https://app.prismax.ai/",
@@ -162,3 +209,5 @@ def resolve_data_path(path: str | Path) -> Path:
     if path_obj.is_absolute():
         return path_obj
     return Path(__file__).resolve().parent / path_obj
+
+

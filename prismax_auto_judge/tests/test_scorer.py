@@ -79,3 +79,116 @@ class ScorerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class VLMClientTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config, _ = load_config(ROOT / "config.yaml")
+
+    def test_vlm_request_package_renders_prompt_and_features(self) -> None:
+        from vlm_client import VLMClient
+
+        client = VLMClient(self.config)
+        package = client.build_request_package(
+            task_prompt="pick up the cup",
+            frame_paths={"main": ["frame_000.jpg", "frame_010.jpg"]},
+            video_paths={"main": "video.mp4"},
+            features={
+                "main": {
+                    "black_frame_ratio": 0.01,
+                    "freeze_ratio": 0.02,
+                    "motion_energy": 3.4,
+                    "brightness_mean": 120,
+                    "blur_score": 88,
+                }
+            },
+            episode_id="episode_vlm",
+        )
+        self.assertEqual(package["episode_id"], "episode_vlm")
+        self.assertEqual(package["frame_count"], 2)
+        self.assertIn("pick up the cup", package["prompt"])
+        self.assertIn("black_frame_ratio: 0.01", package["prompt"])
+        self.assertEqual(package["cv_features"]["motion_energy"], 3.4)
+
+    def test_vlm_client_exports_request_without_calling_api(self) -> None:
+        from vlm_client import VLMClient
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.config["vlm"]["request_dir"] = tmp
+            self.config["vlm"]["enabled"] = False
+            client = VLMClient(self.config)
+            result = client.judge_episode(
+                task_prompt="move the block",
+                frame_paths={"main": ["frame.jpg"]},
+                video_paths={"main": "video.mp4"},
+                features={"_aggregate": {"black_frame_ratio": 0, "freeze_ratio": 0, "motion_energy": 1, "brightness_mean": 100, "blur_score": 50}},
+                episode_id="episode_export",
+            )
+            self.assertIsNone(result)
+            exported = list(Path(tmp).glob("episode_export_*.json"))
+            self.assertEqual(len(exported), 1)
+            self.assertIn('"prompt_version": "prismax_vla_v1"', exported[0].read_text(encoding="utf-8"))
+
+class MultiProviderVLMTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config, _ = load_config(ROOT / "config.yaml")
+
+    def test_parse_json_from_markdown_block(self) -> None:
+        from vlm_client import VLMClient
+
+        parsed = VLMClient.parse_json_text('```json\n{"confidence": 0.8}\n```')
+        self.assertEqual(parsed["confidence"], 0.8)
+
+    def test_deepseek_text_provider_is_blocked_as_primary_by_default(self) -> None:
+        from vlm_client import VLMClient
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.config["vlm"]["enabled"] = True
+            self.config["vlm"]["provider"] = "deepseek_text"
+            self.config["vlm"]["request_dir"] = tmp
+            self.config["vlm"]["allow_text_only_primary"] = False
+            client = VLMClient(self.config)
+            with self.assertRaises(RuntimeError) as ctx:
+                client.judge_episode(
+                    task_prompt="pick up object",
+                    frame_paths={"main": ["missing.jpg"]},
+                    video_paths={"main": "video.mp4"},
+                    features={"_aggregate": {"black_frame_ratio": 0, "freeze_ratio": 0, "motion_energy": 1, "brightness_mean": 100, "blur_score": 50}},
+                    episode_id="deepseek_blocked",
+                )
+            self.assertIn("Text-only provider cannot be used", str(ctx.exception))
+            self.assertEqual(len(list(Path(tmp).glob("deepseek_blocked_*.json"))), 1)
+
+    def test_builtin_provider_profiles_exist(self) -> None:
+        vlm_cfg = self.config["vlm"]
+        self.assertIn("openai_compatible", vlm_cfg["provider_profiles"])
+        self.assertIn("deepseek_text", vlm_cfg["provider_profiles"])
+        self.assertIn("xiaomi_compatible", vlm_cfg["provider_profiles"])
+
+class DailyWorkflowPolicyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config, _ = load_config(ROOT / "config.yaml")
+
+    def test_daily_workflow_blocks_when_quota_reached(self) -> None:
+        from workflow_policy import DailyWorkflowPolicy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.config["daily_workflow"]["daily_counts_path"] = "counts.json"
+            self.config["daily_workflow"]["max_labels_per_day"] = 1
+            policy = DailyWorkflowPolicy(self.config, tmp)
+            policy.record_vla_result(True)
+            allowed, reason = policy.can_attempt_vla()
+            self.assertFalse(allowed)
+            self.assertIn("daily_vla_quota_reached", reason)
+
+    def test_daily_workflow_allows_missing_control_state_by_default(self) -> None:
+        from workflow_policy import DailyWorkflowPolicy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.config["daily_workflow"]["control_state_file"] = "missing.json"
+            self.config["daily_workflow"]["block_if_control_state_missing"] = False
+            policy = DailyWorkflowPolicy(self.config, tmp)
+            allowed, reason = policy.is_control_ready()
+            self.assertTrue(allowed)
+            self.assertIn("control_state_missing_but_not_blocking", reason)
+
+

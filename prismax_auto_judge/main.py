@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from pathlib import Path
 from typing import Any
 
 from config_loader import load_config, resolve_data_path
@@ -9,6 +10,7 @@ from control_adapter import iter_local_episodes
 from judge_logger import JsonlLogger
 from processed_registry import ProcessedRegistry
 from scorer import PrismaXScorer
+from workflow_policy import DailyWorkflowPolicy
 
 
 VALID_MODES = {"dry_run", "assist_preview", "assist_fill", "auto"}
@@ -93,10 +95,16 @@ def run_local_batch(config: dict[str, Any], config_hash: str, video_dir: str | N
     logger = JsonlLogger(log_path)
     registry = ProcessedRegistry(registry_path)
     scorer = PrismaXScorer(config, config_hash)
+    workflow = DailyWorkflowPolicy(config, Path(__file__).resolve().parent)
 
     processed_count = 0
     auto_submit_count = 0
     for episode in iter_local_episodes(video_root):
+        allowed, workflow_reason = workflow.can_attempt_vla()
+        if not allowed:
+            print(f"VLA blocked by workflow policy: {workflow_reason}")
+            break
+
         episode_id = str(episode["episode_id"])
         if registry.is_submitted(episode_id):
             continue
@@ -104,6 +112,7 @@ def run_local_batch(config: dict[str, Any], config_hash: str, video_dir: str | N
         control_record, auto_submit_count = apply_local_mode(result, mode, config, auto_submit_count)
         logger.write(build_log_record(episode, result, mode, config_hash, scorer.version, control_record))
         registry.mark(episode_id, str(result.get("decision")), bool(control_record.get("submitted")))
+        workflow.record_vla_result(bool(control_record.get("submitted")))
         processed_count += 1
         print(f"{episode_id}: {result['decision']} submit={control_record['submitted']} reason={result['reason']}")
         if mode == "auto" and control_record.get("submitted"):
@@ -116,7 +125,7 @@ def run_local_batch(config: dict[str, Any], config_hash: str, video_dir: str | N
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="PrismaX VLA auto judge v0")
+    parser = argparse.ArgumentParser(description="PrismaX VLA auto judge")
     parser.add_argument("--config", default=None, help="Path to config.yaml")
     parser.add_argument("--video-dir", default=None, help="Local video folder for dry-run batch")
     args = parser.parse_args()
