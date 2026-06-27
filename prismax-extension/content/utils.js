@@ -97,6 +97,64 @@ var PX = PX || {};
         return location.hostname === 'app.prismax.ai' && location.pathname.replace(/\/$/, '') === '/data/review';
     }
 
+
+    const PAGE_MODES = {
+        CONTROL: 'CONTROL_MODE',
+        VLA_REVIEW: 'VLA_REVIEW_MODE',
+        IDLE: 'IDLE_MODE'
+    };
+
+    function detectPageMode() {
+        if (isDataReviewPage()) return PAGE_MODES.VLA_REVIEW;
+        if (location.hostname !== 'app.prismax.ai') return PAGE_MODES.IDLE;
+        const path = location.pathname || '';
+        if (path.includes('/live-control') || path.includes('/robots-center')) return PAGE_MODES.CONTROL;
+        const bodyText = document.body ? (document.body.innerText || '') : '';
+        if (/End\s+(Tele-Operation|Session|Control)|Leave\s+Queue|Join\s+Queue|Enter\s+Live\s+Control/i.test(bodyText)) {
+            return PAGE_MODES.CONTROL;
+        }
+        if (findValidationEntryButton()) return PAGE_MODES.CONTROL;
+        return PAGE_MODES.IDLE;
+    }
+
+    const actionLockState = { owner: null, until: 0, reason: '' };
+
+    const ActionLock = {
+        acquire(owner, ttlMs, reason) {
+            const now = Date.now();
+            if (actionLockState.owner && actionLockState.until > now && actionLockState.owner !== owner) {
+                return false;
+            }
+            actionLockState.owner = owner;
+            actionLockState.until = now + Math.max(1000, ttlMs || 10000);
+            actionLockState.reason = reason || '';
+            return true;
+        },
+        release(owner) {
+            if (!owner || actionLockState.owner === owner || actionLockState.until <= Date.now()) {
+                actionLockState.owner = null;
+                actionLockState.until = 0;
+                actionLockState.reason = '';
+                return true;
+            }
+            return false;
+        },
+        isLocked() {
+            if (actionLockState.owner && actionLockState.until <= Date.now()) this.release(actionLockState.owner);
+            return !!actionLockState.owner;
+        },
+        getOwner() {
+            return this.isLocked() ? actionLockState.owner : null;
+        },
+        getState() {
+            return {
+                owner: this.getOwner(),
+                until: actionLockState.until,
+                reason: actionLockState.reason
+            };
+        }
+    };
+
     function findReviewEarnButton() {
         const candidates = Array.from(document.querySelectorAll('button, [role="button"]'));
         for (const el of candidates) {
@@ -137,6 +195,8 @@ var PX = PX || {};
         return null;
     }
 
+    PX.ActionLock = ActionLock;
+
     PX.Utils = {
         getTodayStr: getTodayStr,
         getRandomInt: getRandomInt,
@@ -151,6 +211,9 @@ var PX = PX || {};
         isDataReviewListPage: isDataReviewListPage,
         findReviewEarnButton: findReviewEarnButton,
         findValidationEntryButton: findValidationEntryButton,
+        PAGE_MODES: PAGE_MODES,
+        detectPageMode: detectPageMode,
+        ActionLock: ActionLock,
         parseQueueRank: parseQueueRank
     };
 })();

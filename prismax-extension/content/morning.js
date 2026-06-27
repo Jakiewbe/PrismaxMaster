@@ -114,6 +114,10 @@ var PX = PX || {};
 
     function performMorningRequeue(config, storage, notifier) {
         if (morning.lock) return;
+        if (PX.ActionLock && !PX.ActionLock.acquire('morning', 120000, 'morning requeue')) {
+            console.log('[Morning] skipped (action lock held by ' + PX.ActionLock.getOwner() + ')');
+            return;
+        }
         morning.lock = true;
         setTimeout(() => { morning.lock = false; }, 1000);
 
@@ -122,6 +126,7 @@ var PX = PX || {};
 
         if (PX._scriptPaused) {
             console.log("[Morning] skipped (script paused)");
+            if (PX.ActionLock) PX.ActionLock.release('morning');
             return;
         }
 
@@ -132,6 +137,7 @@ var PX = PX || {};
         if (!currentURL.includes('/robots-center') && !currentURL.includes('/live-control')) {
             console.log("[Morning] not on teleop page, navigating to robots-center...");
             PX.Panel.updateUI("早八: 跳转到机器人中心...", "--", "--", "#66ccff", storage);
+            if (PX.ActionLock) PX.ActionLock.release('morning');
             window.location.href = armCfg.robotCenterURL || 'https://app.prismax.ai/robots-center';
             return;
         }
@@ -142,6 +148,7 @@ var PX = PX || {};
         if (!queueBtn && !enterBtn) {
             console.log("[Morning] no queue/enter button found, retrying...");
             PX.Panel.updateUI("早八: 按钮未刷新，等待中...", "--", "--", "#ff3333", storage);
+            if (PX.ActionLock) PX.ActionLock.release('morning');
             return;
         }
 
@@ -161,6 +168,7 @@ var PX = PX || {};
 
         if (queueBtn) {
             if (armCfg.morningReturnToGold) {
+                if (PX.ActionLock) PX.ActionLock.release('morning');
                 if (PX.ArmSwitch && PX.ArmSwitch.returnToTrainingGold) {
                     PX.ArmSwitch.returnToTrainingGold(queueBtn, config, storage, notifier);
                 }
@@ -169,10 +177,12 @@ var PX = PX || {};
             PX.Panel.updateUI("早八: 重置连接...", "--", "--", "#66ccff", storage);
             if (PX.ArmSwitch) PX.ArmSwitch.leaveQueueThenReenter(queueBtn, config);
             PX._autoState.qStart = 0; PX._autoState.lastRawRank = -1;
+            if (PX.ActionLock) PX.ActionLock.release('morning');
         } else if (enterBtn) {
             PX.Panel.updateUI("早八: 建立新连接...", "--", "--", "#66ccff", storage);
             try { enterBtn.click(); } catch (e) { console.error(e); }
             updateWatchdogHeartbeat();
+            if (PX.ActionLock) PX.ActionLock.release('morning');
         }
     }
 

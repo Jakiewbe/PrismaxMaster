@@ -13,7 +13,7 @@ from scorer import PrismaXScorer
 from workflow_policy import DailyWorkflowPolicy
 
 
-VALID_MODES = {"dry_run", "assist_preview", "assist_fill", "auto"}
+VALID_MODES = {"dry_run", "assist_preview", "assist_fill", "auto", "auto_limited"}
 
 
 def build_log_record(
@@ -63,7 +63,7 @@ def apply_local_mode(result: dict[str, Any], mode: str, config: dict[str, Any], 
         control_record["submit_status"] = "live_control_not_implemented"
         return control_record, auto_submit_count
 
-    if mode == "auto":
+    if mode in {"auto", "auto_limited"}:
         safety = config.get("safety", {})
         if result.get("decision") == "FAIL" and not safety.get("allow_auto_fail_submit", False):
             control_record["submit_status"] = "auto_fail_submit_disabled"
@@ -115,7 +115,7 @@ def run_local_batch(config: dict[str, Any], config_hash: str, video_dir: str | N
         workflow.record_vla_result(bool(control_record.get("submitted")))
         processed_count += 1
         print(f"{episode_id}: {result['decision']} submit={control_record['submitted']} reason={result['reason']}")
-        if mode == "auto" and control_record.get("submitted"):
+        if mode in {"auto", "auto_limited"} and control_record.get("submitted"):
             auto_submit_count += 1
             time.sleep(float(config.get("safety", {}).get("submit_cooldown_seconds", 2)))
 

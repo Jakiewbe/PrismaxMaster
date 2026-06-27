@@ -146,7 +146,6 @@ var PX = PX || {};
 
     async function performCommentTask(config, storage, notifier) {
         if (!config.commentTask || !config.commentTask.enabled) return;
-
         // Check if already done today
         if (storage.isCommentTaskDone()) return;
 
@@ -159,6 +158,15 @@ var PX = PX || {};
         if (storage.isCommentInProgress() && storage.isCommentTaskTimeout()) {
             console.log('[评论任务] 检测到超时，重置状态');
             await storage.resetCommentTaskState();
+        }
+
+        let lockAcquired = false;
+        if (PX.ActionLock) {
+            lockAcquired = PX.ActionLock.acquire('comment_task', 180000, 'comment task');
+            if (!lockAcquired) {
+                console.log('[评论任务] 跳过：任务锁被占用', PX.ActionLock.getOwner());
+                return;
+            }
         }
 
         const comments = config.commentTask.comments;
@@ -253,6 +261,7 @@ var PX = PX || {};
             if (storage.isCommentInProgress()) {
                 await storage.setCommentInProgress(false);
             }
+            if (lockAcquired && PX.ActionLock) PX.ActionLock.release('comment_task');
             PX.Panel.updateCommentTaskUI(storage);
             console.log(`[评论任务] ========== 任务结束 ==========`);
         }

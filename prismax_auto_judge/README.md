@@ -3,6 +3,8 @@
 Production-safe defaults:
 
 - `runtime.mode` defaults to `dry_run`.
+- Supported modes: `dry_run`, `assist_preview`, `assist_fill`, `auto`, `auto_limited`.
+- `auto_limited` still uses submit safety checks, and also respects the daily VLA workflow quota.
 - `vlm.enabled` defaults to `false`.
 - `safety.allow_auto_fail_submit` defaults to `false`.
 - Text-only providers are blocked as primary VLA scorers unless explicitly allowed.
@@ -61,4 +63,4 @@ Outputs:
 
 ## Safety Rule
 
-Do not use `auto` until a real dry-run batch has been reviewed. Normal videos without a valid VLM result remain `UNCERTAIN` and are not submitted.
+Do not use `auto` or `auto_limited` until a real dry-run batch has been reviewed. Normal videos without a valid VLM result remain `UNCERTAIN` and are not submitted.

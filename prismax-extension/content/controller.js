@@ -33,7 +33,8 @@ var PX = PX || {};
             lastScriptError: '',
             pendingEventLogs: [],
             walletPopupActive: false,
-            walletPopupLastSeen: 0
+            walletPopupLastSeen: 0,
+            pageMode: 'IDLE_MODE'
         };
 
         function log(...args) {
@@ -119,7 +120,16 @@ var PX = PX || {};
         }
 
         function detectPageState() {
-            if (PX.Utils.isDataReviewPage && PX.Utils.isDataReviewPage()) {
+            const pageMode = PX.Utils.detectPageMode ? PX.Utils.detectPageMode() : 'IDLE_MODE';
+            state.pageMode = pageMode;
+            if (pageMode === 'VLA_REVIEW_MODE') {
+                state.isOperating = false;
+                state.isQueuing = false;
+                state.isStandby = true;
+                adjustPerformanceMode(null);
+                return state;
+            }
+            if (pageMode === 'IDLE_MODE') {
                 state.isOperating = false;
                 state.isQueuing = false;
                 state.isStandby = true;
@@ -399,11 +409,23 @@ var PX = PX || {};
             detectWalletPopup();
 
             const effectiveAllowOperation = state.isOperating && !state.walletPopupActive;
+            const actionLock = PX.ActionLock ? PX.ActionLock.getState() : { owner: null, until: 0, reason: '' };
+            const pageMode = state.pageMode || (PX.Utils.detectPageMode ? PX.Utils.detectPageMode() : 'IDLE_MODE');
+            const safeToSwitchToVla = pageMode !== 'CONTROL_MODE' && !state.isOperating && !state.isQueuing && !actionLock.owner && !state.walletPopupActive;
 
             const currentState = {
                 timestamp: Date.now(),
                 updateTime: new Date().toISOString(),
                 allowOperation: effectiveAllowOperation,
+                pageMode: pageMode,
+                actionLockOwner: actionLock.owner,
+                actionLockUntil: actionLock.until,
+                actionLockReason: actionLock.reason,
+                controlReady: pageMode === 'CONTROL_MODE' && !state.walletPopupActive && state.lastPushSuccess,
+                vlaReady: pageMode === 'VLA_REVIEW_MODE' && !state.walletPopupActive,
+                todayControlSuccessCount: state.totalOperations,
+                todayVlaSubmittedCount: Number(localStorage.getItem('prismax_vla_submitted_today') || '0'),
+                safeToSwitchToVla: safeToSwitchToVla,
                 walletPopupActive: state.walletPopupActive,
                 isOperating: state.isOperating,
                 isQueuing: state.isQueuing,
@@ -575,6 +597,8 @@ var PX = PX || {};
                 isOperating: state.isOperating,
                 isQueuing: state.isQueuing,
                 isStandby: state.isStandby,
+                pageMode: state.pageMode,
+                actionLockOwner: PX.ActionLock ? PX.ActionLock.getOwner() : null,
                 totalOperations: state.totalOperations,
                 anomalyCount: state.anomalyCount,
                 consecutiveAnomalies: state.consecutiveAnomalies,

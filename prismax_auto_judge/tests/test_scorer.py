@@ -195,3 +195,23 @@ class DailyWorkflowPolicyTests(unittest.TestCase):
             self.assertIn("control_state_missing_but_not_blocking", reason)
 
 
+
+
+class MainModeTests(unittest.TestCase):
+    def test_auto_limited_mode_is_supported(self) -> None:
+        from main import VALID_MODES
+
+        self.assertIn("auto_limited", VALID_MODES)
+
+    def test_auto_limited_keeps_fail_submit_disabled_by_default(self) -> None:
+        from main import apply_local_mode
+
+        control, count = apply_local_mode(
+            {"decision": "FAIL", "should_submit": True},
+            "auto_limited",
+            {"safety": {"allow_auto_fail_submit": False, "max_auto_submit_per_run": 10}},
+            0,
+        )
+        self.assertFalse(control["submitted"])
+        self.assertEqual(control["submit_status"], "auto_fail_submit_disabled")
+        self.assertEqual(count, 0)

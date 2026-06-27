@@ -149,7 +149,9 @@ var PX = PX || {};
             return;
         }
 
-        if (PX.Utils.isDataReviewPage && PX.Utils.isDataReviewPage()) {
+        const pageMode = PX.Utils.detectPageMode ? PX.Utils.detectPageMode() : 'CONTROL_MODE';
+        if (pageMode === 'VLA_REVIEW_MODE') {
+            if (PX.ActionLock) PX.ActionLock.acquire('vla_review', 3000, 'data review page active');
             PX._autoState.qStart = 0;
             PX._autoState.standbyMode = false;
             PX._autoState.lastMoveTime = now;
@@ -161,6 +163,20 @@ var PX = PX || {};
             }
             document.title = "PrismaX Data Review";
             setTimeout(() => loopWrapper(config, storage, notifier, controller), 2000);
+            return;
+        }
+        if (PX.ActionLock && PX.ActionLock.getOwner && PX.ActionLock.getOwner() === 'vla_review') {
+            PX.ActionLock.release('vla_review');
+        }
+        if (pageMode === 'IDLE_MODE') {
+            PX.Panel.updateUI("页面状态未识别", "IDLE", "--", "#777777", storage);
+            setTimeout(() => loopWrapper(config, storage, notifier, controller), 2000);
+            return;
+        }
+        const lockOwner = PX.ActionLock && PX.ActionLock.getOwner ? PX.ActionLock.getOwner() : null;
+        if (lockOwner && !['queue_entry'].includes(lockOwner)) {
+            PX.Panel.updateUI(`等待任务锁: ${lockOwner}`, "LOCKED", "--", "#ffaa00", storage);
+            setTimeout(() => loopWrapper(config, storage, notifier, controller), 1000);
             return;
         }
 
@@ -434,6 +450,11 @@ var PX = PX || {};
             }
 
             if (!enterBtn._pScheduled) {
+                if (PX.ActionLock && !PX.ActionLock.acquire('queue_entry', config.clickDelayMax + 3000, 'scheduled queue entry click')) {
+                    PX.Panel.updateUI("等待任务锁释放", PX.ActionLock.getOwner(), "--", "#ffaa00", storage);
+                    setTimeout(() => loopWrapper(config, storage, notifier, controller), 1000);
+                    return;
+                }
                 PX._autoState.clickRetryCount++;
                 const delay = PX.Utils.getRandomInt(config.clickDelayMin, config.clickDelayMax);
                 enterBtn._pScheduled = true;
@@ -446,6 +467,7 @@ var PX = PX || {};
                         console.error(e);
                     } finally {
                         enterBtn._pScheduled = false;
+                        if (PX.ActionLock) PX.ActionLock.release('queue_entry');
                     }
                 }, delay);
             }

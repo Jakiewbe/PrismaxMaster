@@ -88,6 +88,17 @@ var PX = PX || {};
         return storage.get() + storage.getAnomalyCount();
     }
 
+    function acquireArmSwitchLock(reason) {
+        if (!PX.ActionLock) return true;
+        const ok = PX.ActionLock.acquire('arm_switch', 180000, reason || 'arm switch');
+        if (!ok) console.log('[ArmSwitch] action lock busy:', PX.ActionLock.getOwner());
+        return ok;
+    }
+
+    function releaseArmSwitchLock() {
+        if (PX.ActionLock) PX.ActionLock.release('arm_switch');
+    }
+
     // v2: join an arm by clicking its card, then clicking the join button inside it
     function joinArm(label, config, attempt, done) {
         if (!attempt) attempt = 0;
@@ -190,6 +201,7 @@ var PX = PX || {};
             PX.Panel.updateUI('already on Arena queue', '--', '--', '#00ff99', storage);
             return;
         }
+        if (!acquireArmSwitchLock('switch to Arena Arm')) return;
         PX._autoState.armSwitchInProgress = true;
         storage.setArmSwitchInProgress(true);
         const attempts = getGoldAttemptCount(storage);
@@ -206,6 +218,7 @@ var PX = PX || {};
                     PX.Panel.updateUI('Arena switch failed, retrying', '--', '--', '#ff3333', storage);
                 }
                 PX._autoState.armSwitchInProgress = false;
+                releaseArmSwitchLock();
             });
         };
 
@@ -214,6 +227,7 @@ var PX = PX || {};
             setTimeout(() => confirmLeaveAndWait((ok) => { if (ok) doSwitch(); else {
                 storage.setArmSwitchInProgress(false);
                 PX._autoState.armSwitchInProgress = false;
+                releaseArmSwitchLock();
             }}, config), 250);
         } else { doSwitch(); }
     }
@@ -240,6 +254,9 @@ var PX = PX || {};
             PX.Panel.updateUI('already on Gold queue', '--', '--', '#00ff99', storage);
             return;
         }
+        if (!acquireArmSwitchLock('switch to Training Gold')) return;
+        PX._autoState.armSwitchInProgress = true;
+        storage.setArmSwitchInProgress(true);
         PX.Panel.updateUI('morning: switching to Gold...', '--', '--', '#66ccff', storage);
 
         const doSwitchGold = () => {
@@ -255,16 +272,15 @@ var PX = PX || {};
                 }
                 storage.setArmSwitchInProgress(false);
                 PX._autoState.armSwitchInProgress = false;
+                releaseArmSwitchLock();
             });
         };
 
         if (queueBtn) {
-            PX._autoState.armSwitchInProgress = true;
-            storage.setArmSwitchInProgress(true);
             try { queueBtn.click(); } catch (e) {}
             setTimeout(() => confirmLeaveAndWait((ok) => {
                 if (ok) doSwitchGold();
-                else { storage.setArmSwitchInProgress(false); PX._autoState.armSwitchInProgress = false; }
+                else { storage.setArmSwitchInProgress(false); PX._autoState.armSwitchInProgress = false; releaseArmSwitchLock(); }
             }, config), 250);
         } else { doSwitchGold(); }
     }
