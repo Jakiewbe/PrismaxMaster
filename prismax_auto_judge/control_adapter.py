@@ -27,6 +27,7 @@ class PrismaXControlAdapter:
     def open_page(self) -> None:
         """Connect to Chrome via CDP and navigate to PrismaX dashboard."""
         from playwright.sync_api import sync_playwright  # type: ignore
+        import time
 
         cdp_url = self.config.get("browser", {}).get("cdp_url", "http://127.0.0.1:9222")
         self._playwright = sync_playwright().start()
@@ -45,17 +46,13 @@ class PrismaXControlAdapter:
         self._page.goto(dashboard, timeout=15000, wait_until="domcontentloaded")
 
         # Verify logged in
-        import time
         time.sleep(3)
         body = self._page.locator("body").inner_text()
-        if "All-Time Prisma Points" not in body and "Begin Validating" not in body:
-            raise RuntimeError("Not logged in to PrismaX — please log in first")
+        logged_in_markers = ["All-Time Prisma Points", "Begin Validating", "Control Now", "Review & Earn"]
+        if not any(marker in body for marker in logged_in_markers):
+            raise RuntimeError("Not logged in to PrismaX - please log in first")
 
-        # Navigate to review list
-        selectors = self.config.get("browser", {}).get("selectors", {})
-        begin_sel = selectors.get("begin_validating_button", "button:has-text('Begin Validating')")
-        self._page.locator(begin_sel).first.click()
-        time.sleep(4)
+        self._open_review_list()
 
     def close(self) -> None:
         """Disconnect from browser (does not close Chrome)."""
@@ -89,18 +86,115 @@ class PrismaXControlAdapter:
 
     # ── navigation ─────────────────────────────────────────────
 
-    def open_first_review(self) -> bool:
-        """Click first Review & Earn button on the review list page."""
-        sel = self.config.get("browser", {}).get("selectors", {}).get(
-            "review_earn_button", "button:has-text('Review & Earn')"
-        )
+    def _open_review_list(self) -> None:
+        """Open the current Data Review list from dashboard/banner/carousel UI."""
         import time
-        btn = self._page.locator(sel).first
-        if btn.count() == 0:
+
+        if not self._page:
+            raise RuntimeError("Browser page is not open")
+
+        review_list_url = self.config.get("browser", {}).get("urls", {}).get(
+            "review_list", "https://app.prismax.ai/data/review"
+        )
+
+        if is_review_list_url(self._page.url):
+            return
+
+        selectors = self.config.get("browser", {}).get("selectors", {})
+        candidate_selectors = selectors.get("validation_entry_buttons") or [
+            "button:has-text('Begin Validating')",
+            "a:has-text('Begin Validating')",
+            "button:has-text('Control Now')",
+            "a:has-text('Control Now')",
+            "[role='button']:has-text('Begin Validating')",
+            "[role='button']:has-text('Control Now')",
+        ]
+
+        for _ in range(2):
+            for sel in candidate_selectors:
+                locator = self._page.locator(sel)
+                count = locator.count()
+                for idx in range(count):
+                    candidate = locator.nth(idx)
+                    if not candidate.is_visible():
+                        continue
+                    candidate.click()
+                    time.sleep(4)
+                    has_review_button = self._page.locator("button:has-text('Review & Earn')").count() > 0
+                    if is_review_list_url(self._page.url) or has_review_button:
+                        return
+
+            if self._click_home_slider_next():
+                time.sleep(1)
+                continue
+            break
+
+        self._page.goto(review_list_url, timeout=15000, wait_until="domcontentloaded")
+        time.sleep(3)
+        if not is_review_list_url(self._page.url):
+            raise RuntimeError(f"Could not open PrismaX review list, current url={self._page.url}")
+
+    def _click_home_slider_next(self) -> bool:
+        """Advance the home banner/carousel once when the validation entry is hidden on another slide."""
+        if not self._page:
             return False
-        btn.first.click()
+        clicked = self._page.evaluate("""
+            () => {
+                const isVisible = (el) => {
+                    const s = getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && r.width > 0 && r.height > 0;
+                };
+                const controls = Array.from(document.querySelectorAll('button,[role="button"],a'));
+                const next = controls.find((el) => {
+                    if (!isVisible(el)) return false;
+                    const text = [el.innerText, el.textContent, el.getAttribute('aria-label'), el.getAttribute('title')]
+                        .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().toLowerCase();
+                    const cls = String(el.className || '').toLowerCase();
+                    return text === 'next' || text.includes('next slide') || cls.includes('swiper-button-next') ||
+                        cls.includes('carousel-next') || cls.includes('slick-next');
+                });
+                if (!next) return false;
+                next.click();
+                return true;
+            }
+        """)
+        return bool(clicked)
+
+    def open_first_review(self) -> bool:
+        """Click first visible Review & Earn button on the review list page."""
+        import time
+
+        if not self._page:
+            raise RuntimeError("Browser page is not open")
+
+        if not is_review_list_url(self._page.url):
+            self._open_review_list()
+
+        clicked = self._page.evaluate("""
+            () => {
+                const isVisible = (el) => {
+                    const s = getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && r.width > 0 && r.height > 0;
+                };
+                const buttons = Array.from(document.querySelectorAll('button,[role="button"]'));
+                const btn = buttons.find((el) => {
+                    if (!isVisible(el)) return false;
+                    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+                    const text = [el.innerText, el.textContent, el.getAttribute('aria-label'), el.getAttribute('title')]
+                        .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+                    return /Review\s*&\s*Earn/i.test(text);
+                });
+                if (!btn) return false;
+                btn.click();
+                return true;
+            }
+        """)
+        if not clicked:
+            return False
         time.sleep(5)
-        return True
+        return bool(parse_review_url(self._page.url).get("task_id"))
 
     def next_episode(self) -> None:
         """Click next-episode navigation button."""
@@ -209,6 +303,11 @@ def parse_review_url(url: str) -> dict[str, str | None]:
     if match:
         task_id = match.group(1)
     return {"task_id": task_id, "upload_id": upload_id}
+
+
+def is_review_list_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.netloc == "app.prismax.ai" and parsed.path.rstrip("/") == "/data/review"
 
 
 def parse_episode_id(page_text: str, pattern: str = r"Episode #(\d+)") -> str | None:

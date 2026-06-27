@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from config_loader import load_config
-from control_adapter import parse_episode_id, parse_review_progress, parse_review_url
+from control_adapter import is_review_list_url, parse_episode_id, parse_review_progress, parse_review_url
 from judge_logger import JsonlLogger
 from schemas import validate_vlm_output
 from scorer import PrismaXScorer
@@ -73,6 +73,9 @@ class ScorerTests(unittest.TestCase):
             parse_review_url("https://app.prismax.ai/data/review/74?upload=273"),
             {"task_id": "74", "upload_id": "273"},
         )
+        self.assertTrue(is_review_list_url("https://app.prismax.ai/data/review"))
+        self.assertTrue(is_review_list_url("https://app.prismax.ai/data/review/"))
+        self.assertFalse(is_review_list_url("https://app.prismax.ai/data/review/74?upload=273"))
         self.assertEqual(parse_episode_id("Episode #14460 1 of 14"), "14460")
         self.assertEqual(parse_review_progress("Episode #14460 1 of 14"), {"current": 1, "total": 14})
 

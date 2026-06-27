@@ -88,6 +88,34 @@ var PX = PX || {};
         return null;
     }
 
+
+    function isDataReviewPage() {
+        return location.hostname === 'app.prismax.ai' && location.pathname.indexOf('/data/review') === 0;
+    }
+
+    function isDataReviewListPage() {
+        return location.hostname === 'app.prismax.ai' && location.pathname.replace(/\/$/, '') === '/data/review';
+    }
+
+    function findReviewEarnButton() {
+        const candidates = Array.from(document.querySelectorAll('button, [role="button"]'));
+        for (const el of candidates) {
+            const actionEl = toActionElement(el);
+            if (!isVisibleElement(actionEl)) continue;
+            if (actionEl.disabled || actionEl.getAttribute('aria-disabled') === 'true') continue;
+            const text = getElementText(actionEl);
+            if (/Review\s*&\s*Earn/i.test(text)) return actionEl;
+        }
+        return null;
+    }
+
+    function findValidationEntryButton() {
+        return findClickableByKeywords(['Begin Validating', 'Start Validating', 'Control Now'], {
+            blacklist: ['Connect Wallet', 'MetaMask', 'Phantom', 'OKX'],
+            excludeLeave: true
+        });
+    }
+
     function parseQueueRank(text) {
         if (!text) return null;
         const frontMatch = text.match(/(\d{1,4})\s*(?:users?|people)\s+in\s+front/i) ||
@@ -119,6 +147,10 @@ var PX = PX || {};
         getElementText: getElementText,
         toActionElement: toActionElement,
         findClickableByKeywords: findClickableByKeywords,
+        isDataReviewPage: isDataReviewPage,
+        isDataReviewListPage: isDataReviewListPage,
+        findReviewEarnButton: findReviewEarnButton,
+        findValidationEntryButton: findValidationEntryButton,
         parseQueueRank: parseQueueRank
     };
 })();

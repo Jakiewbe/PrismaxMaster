@@ -149,8 +149,23 @@ var PX = PX || {};
             return;
         }
 
+        if (PX.Utils.isDataReviewPage && PX.Utils.isDataReviewPage()) {
+            PX._autoState.qStart = 0;
+            PX._autoState.standbyMode = false;
+            PX._autoState.lastMoveTime = now;
+            const reviewBtn = PX.Utils.findReviewEarnButton ? PX.Utils.findReviewEarnButton() : null;
+            if (PX.Utils.isDataReviewListPage && PX.Utils.isDataReviewListPage()) {
+                PX.Panel.updateUI(reviewBtn ? "Data Review 列表已就绪" : "Data Review 列表加载中", "VLA流程", "--", reviewBtn ? "#00ff99" : "#aaaaaa", storage);
+            } else {
+                PX.Panel.updateUI("Data Review 评分页", "VLA流程", "--", "#66ccff", storage);
+            }
+            document.title = "PrismaX Data Review";
+            setTimeout(() => loopWrapper(config, storage, notifier, controller), 2000);
+            return;
+        }
+
         // Button detection
-        const enterBtn = findBtn(config.text.enter);
+        const enterBtn = PX.Utils.findValidationEntryButton ? PX.Utils.findValidationEntryButton() : findBtn(config.text.enter);
         const endBtn = findBtn(config.text.end);
         const queueBtn = findBtn(config.text.queuing);
         const skipHeavyQueueScan = queueBtn && PX._autoState.standbyMode &&

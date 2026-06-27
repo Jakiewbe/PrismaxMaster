@@ -119,9 +119,17 @@ var PX = PX || {};
         }
 
         function detectPageState() {
+            if (PX.Utils.isDataReviewPage && PX.Utils.isDataReviewPage()) {
+                state.isOperating = false;
+                state.isQueuing = false;
+                state.isStandby = true;
+                adjustPerformanceMode(null);
+                return state;
+            }
+
             const endBtn = findButton(['End Tele-Operation', 'End Session', 'End Control', 'Stop Validating']);
             const queueBtn = findButton(['Leave', 'Leave Queue', 'Waiting', 'Position', 'Queued', 'In Queue']);
-            const enterBtn = findButton(['Enter Live Control', 'Join Queue', 'Enter Pool', 'Begin Validating', 'Start Validating', 'Control Now']);
+            const enterBtn = PX.Utils.findValidationEntryButton ? PX.Utils.findValidationEntryButton() : findButton(['Enter Live Control', 'Join Queue', 'Enter Pool', 'Begin Validating', 'Start Validating', 'Control Now']);
 
             const oldState = {
                 isOperating: state.isOperating,
