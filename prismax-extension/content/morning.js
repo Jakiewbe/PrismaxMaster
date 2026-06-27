@@ -117,11 +117,22 @@ var PX = PX || {};
         morning.lock = true;
         setTimeout(() => { morning.lock = false; }, 1000);
 
-        console.log("[Stark HUD] 执行早八协议检查...");
+        console.log("[Morning] checking morning protocol...");
         updateWatchdogHeartbeat();
 
         if (PX._scriptPaused) {
-            console.log("[Stark HUD] 早八被跳过（脚本暂停）");
+            console.log("[Morning] skipped (script paused)");
+            return;
+        }
+
+        // v2: ensure we're on the right page for queue operations
+        // If on data/review or dashboard, navigate to robots-center for arm selection
+        const currentURL = window.location.href;
+        const armCfg = config.armSwitchTask || {};
+        if (!currentURL.includes('/robots-center') && !currentURL.includes('/live-control')) {
+            console.log("[Morning] not on teleop page, navigating to robots-center...");
+            PX.Panel.updateUI("早八: 跳转到机器人中心...", "--", "--", "#66ccff", storage);
+            window.location.href = armCfg.robotCenterURL || 'https://app.prismax.ai/robots-center';
             return;
         }
 
@@ -129,12 +140,12 @@ var PX = PX || {};
         const enterBtn = findBtn(config.text.enter);
 
         if (!queueBtn && !enterBtn) {
-            console.log("[Stark HUD] 早八触发时刻，但未检测到按钮！等待下一秒重试...");
+            console.log("[Morning] no queue/enter button found, retrying...");
             PX.Panel.updateUI("早八: 按钮未刷新，等待中...", "--", "--", "#ff3333", storage);
             return;
         }
 
-        console.log("[Stark HUD] 发现按钮，触发点击！重置计数！");
+        console.log("[Morning] triggering! resetting counts.");
         notifier.notifyMorningTrigger();
 
         storage.setCount(0);
@@ -149,13 +160,13 @@ var PX = PX || {};
         PX._autoState.morningExtraRequeueDone = false;
 
         if (queueBtn) {
-            if (config.armSwitchTask.morningReturnToGold) {
+            if (armCfg.morningReturnToGold) {
                 if (PX.ArmSwitch && PX.ArmSwitch.returnToTrainingGold) {
                     PX.ArmSwitch.returnToTrainingGold(queueBtn, config, storage, notifier);
                 }
                 return;
             }
-            PX.Panel.updateUI("早八: 正在重置连接...", "--", "--", "#66ccff", storage);
+            PX.Panel.updateUI("早八: 重置连接...", "--", "--", "#66ccff", storage);
             if (PX.ArmSwitch) PX.ArmSwitch.leaveQueueThenReenter(queueBtn, config);
             PX._autoState.qStart = 0; PX._autoState.lastRawRank = -1;
         } else if (enterBtn) {

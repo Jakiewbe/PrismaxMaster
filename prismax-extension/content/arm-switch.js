@@ -1,20 +1,11 @@
 // ============================================================
-// PrismaX Extension - Arm Switch
-// Auto-switch between Arena Arm and Training Gold Arm
+// PrismaX Extension - Arm Switch v2
+// Text+class based arm selection (no hardcoded XPaths)
 // ============================================================
 var PX = PX || {};
 
 (function() {
     'use strict';
-
-    function getElementByXPath(xpath) {
-        try {
-            return document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-        } catch (e) {
-            console.error('[ArmSwitch] XPath 解析失败:', xpath, e);
-            return null;
-        }
-    }
 
     function isVisibleElement(el) {
         return PX.Utils && PX.Utils.isVisibleElement ? PX.Utils.isVisibleElement(el) : !!el;
@@ -26,36 +17,9 @@ var PX = PX || {};
             : ((el && (el.innerText || el.textContent)) || '').trim();
     }
 
-    function clickXPath(xpath, label) {
-        const el = getElementByXPath(xpath);
-        if (!el || !isVisibleElement(el)) {
-            console.log(`[ArmSwitch] 未找到或不可见: ${label}`);
-            return false;
-        }
-        try {
-            el.click();
-            console.log(`[ArmSwitch] 已点击: ${label}`);
-            return true;
-        } catch (e) {
-            console.error(`[ArmSwitch] 点击失败: ${label}`, e);
-            return false;
-        }
-    }
-
-    function findButtonNearElement(root, keywords) {
-        if (!root) return null;
-        const lowerKeywords = keywords.map(k => k.toLowerCase());
-        const candidates = Array.from(root.querySelectorAll('button, [role="button"], span'));
-        return candidates.find(el => {
-            if (!isVisibleElement(el)) return false;
-            const text = getElementText(el).toLowerCase();
-            return lowerKeywords.some(k => text.includes(k));
-        });
-    }
-
     function clickElement(el, label) {
         if (!el || !isVisibleElement(el)) {
-            console.log(`[ArmSwitch] 未找到或不可见: ${label}`);
+            console.log('[ArmSwitch] not found/hidden:', label);
             return false;
         }
         try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
@@ -63,283 +27,195 @@ var PX = PX || {};
             el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
             el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
             el.click();
-            console.log(`[ArmSwitch] 已点击: ${label}`);
+            console.log('[ArmSwitch] clicked:', label);
             return true;
         } catch (e) {
-            console.error(`[ArmSwitch] 点击失败: ${label}`, e);
+            console.error('[ArmSwitch] click failed:', label, e);
             return false;
         }
     }
 
-    function findArmElement(label, xpath) {
-        const xpathEl = getElementByXPath(xpath);
-        if (xpathEl && isVisibleElement(xpathEl)) return xpathEl;
-
-        const candidates = Array.from(document.querySelectorAll('button, [role="button"], div, li'));
-        const pattern = new RegExp(`\\b${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-        const titleEl = candidates.find(el => {
-            if (!isVisibleElement(el)) return false;
+    // v2: find arm card by label text, then find its join/enqueue button
+    function findArmCard(label) {
+        const candidates = Array.from(document.querySelectorAll('[class*="robotName"], [class*="robotCard"], h3, div'));
+        for (const el of candidates) {
             const text = getElementText(el);
-            return pattern.test(text);
-        });
-        if (!titleEl) return null;
-
-        return titleEl.closest('button, [role="button"], li, [class*="Card"], [class*="card"]') || titleEl;
+            if (text === label || text.includes(label)) {
+                // Walk up to find the card container
+                return el.closest('[class*="robotCard"], [class*="card"], [class*="Card"]') || el.closest('div');
+            }
+        }
+        // Fallback: search all text
+        for (const el of Array.from(document.querySelectorAll('h3, [class*="name"], [class*="Name"]'))) {
+            if (getElementText(el).trim() === label) {
+                return el.closest('div');
+            }
+        }
+        return null;
     }
 
-    function getArmCardState(el) {
-        if (!el) return '';
-        return [
-            el.className,
-            el.getAttribute && el.getAttribute('aria-selected'),
-            el.getAttribute && el.getAttribute('data-state'),
-            el.getAttribute && el.getAttribute('data-active')
-        ].filter(Boolean).join(' ').toLowerCase();
+    // v2: find join/enqueue button inside a card container
+    function findJoinButtonInCard(cardEl) {
+        if (!cardEl) return null;
+        const btns = Array.from(cardEl.querySelectorAll('button, [role="button"]'));
+        for (const btn of btns) {
+            if (!isVisibleElement(btn)) continue;
+            const text = getElementText(btn).toLowerCase();
+            if (/join|enter|start|begin|queue|control|入队|进入/.test(text)) return btn;
+        }
+        return null;
     }
 
     function isActiveArm(label) {
-        const armEl = findArmElement(label, label === 'Arena Arm'
-            ? ((PX._config || {}).armSwitchTask || {}).arenaArmXPath
-            : ((PX._config || {}).armSwitchTask || {}).trainingGoldArmXPath);
-        if (!armEl) return false;
-        const stateText = getArmCardState(armEl);
-        if (/(active|selected|current|true)/i.test(stateText)) return true;
-
-        const bodyText = document.body ? getElementText(document.body) : '';
-        const hasOnlyTargetArm = bodyText.includes(label) &&
-            (label === 'Arena Arm'
-                ? !bodyText.includes('Training Arm Gold')
-                : !bodyText.includes('Arena Arm'));
-        return hasOnlyTargetArm;
+        const card = findArmCard(label);
+        if (!card) return false;
+        const stateText = (card.className || '') + ' ' +
+            (card.getAttribute('aria-selected') || '') + ' ' +
+            (card.getAttribute('data-active') || '');
+        return /(active|selected|current|true)/i.test(stateText);
     }
 
     function isQueuedOnArm(label, config) {
         const queueBtn = PX.Automation ? PX.Automation.findBtn(config.text.queuing) : null;
-        if (!queueBtn) return false;
-        const currentArm = PX.Storage && PX.Storage.getCurrentArm ? PX.Storage.getCurrentArm() : '';
-        if (currentArm && currentArm === label) return true;
-        return isActiveArm(label);
+        if (queueBtn) {
+            const currentArm = PX.Storage && PX.Storage.getCurrentArm ? PX.Storage.getCurrentArm() : '';
+            if (currentArm && currentArm === label) return true;
+        }
+        return false;
     }
 
     function getGoldAttemptCount(storage) {
         return storage.get() + storage.getAnomalyCount();
     }
 
-    function joinArm(label, xpath, enterKeywords, config, attempt, done) {
+    // v2: join an arm by clicking its card, then clicking the join button inside it
+    function joinArm(label, config, attempt, done) {
         if (!attempt) attempt = 0;
         if (!done) done = function() {};
 
         if (isQueuedOnArm(label, config)) {
-            console.log(`[ArmSwitch] 已在 ${label} 队列中，跳过重复入队`);
+            console.log('[ArmSwitch] already queued on ' + label);
             done(true);
             return;
         }
 
-        const armEl = findArmElement(label, xpath);
-        if (!armEl) {
+        const card = findArmCard(label);
+        if (!card) {
             if (attempt < 20) {
-                if (attempt === 0) console.log(`[ArmSwitch] 等待 ${label} 卡片加载...`);
-                setTimeout(() => joinArm(label, xpath, enterKeywords, config, attempt + 1, done), 500);
+                if (attempt === 0) console.log('[ArmSwitch] waiting for ' + label + ' card...');
+                setTimeout(() => joinArm(label, config, attempt + 1, done), 500);
             } else {
-                console.log(`[ArmSwitch] 等待 ${label} 超时，未切换`);
+                console.log('[ArmSwitch] timeout waiting for ' + label);
                 done(false);
             }
             return;
         }
 
-        const clickedArm = clickElement(armEl, `${label} 卡片`);
-        if (!clickedArm) {
-            done(false);
-            return;
-        }
+        if (!clickElement(card, label + ' card')) { done(false); return; }
 
         setTimeout(() => {
-            const cardRoot = armEl.closest('div') || armEl;
-            const localEnter = findButtonNearElement(cardRoot, enterKeywords);
-            if (localEnter) {
-                done(clickElement(localEnter, `${label} 卡片内入队按钮`));
-                return;
+            const joinBtn = findJoinButtonInCard(card) ||
+                (PX.Automation ? PX.Automation.findBtn(config.text.enter) : null);
+            if (joinBtn) {
+                done(clickElement(joinBtn, 'join button for ' + label));
+            } else {
+                console.log('[ArmSwitch] no join button found for ' + label);
+                done(false);
             }
-
-            const globalEnter = PX.Automation ? PX.Automation.findBtn(enterKeywords) : null;
-            if (globalEnter) {
-                done(clickElement(globalEnter, '全局入队按钮'));
-                return;
-            }
-
-            console.log(`[ArmSwitch] 未找到入队按钮，二次点击 ${label} 卡片尝试入队`);
-            done(clickElement(armEl, `${label} 卡片（二次）`));
         }, 600);
     }
 
     function joinArenaArm(config, attempt, done) {
-        joinArm('Arena Arm', config.armSwitchTask.arenaArmXPath, config.text.enter, config, attempt, done);
+        joinArm((config.armSwitchTask || {}).arenaArmLabel || 'Arena Arm', config, attempt, done);
     }
 
     function joinTrainingGoldArm(config, attempt, done) {
-        joinArm('Training Arm Gold', config.armSwitchTask.trainingGoldArmXPath, config.text.enter, config, attempt, done);
+        joinArm((config.armSwitchTask || {}).trainingGoldLabel || 'Training Arm Gold', config, attempt, done);
     }
 
-    // Callback-based queue management helpers
+    // v2: queue management helpers (no XPaths)
     function hasLeaveQueueModal() {
-        const confirmBtn = document.querySelector('button[class*="leaveModalConfirmBtn"], .QueuePanel_leaveModalConfirmBtn__ZtiIr');
-        if (confirmBtn && isVisibleElement(confirmBtn)) return true;
-        const exactBtn = Array.from(document.querySelectorAll('button, [role="button"]')).find(el => {
-            if (!isVisibleElement(el)) return false;
-            const text = getElementText(el).toLowerCase();
-            return text === 'leave queue';
+        const modalBtn = document.querySelector('button[class*="leaveModal"], .QueuePanel_leaveModalConfirmBtn__ZtiIr');
+        if (modalBtn && isVisibleElement(modalBtn)) return true;
+        return !!Array.from(document.querySelectorAll('button, [role="button"]')).find(el => {
+            return isVisibleElement(el) && getElementText(el).toLowerCase() === 'leave queue';
         });
-        return !!exactBtn;
     }
 
     function confirmLeaveQueueIfPresent() {
-        let confirmBtn = document.querySelector('button[class*="leaveModalConfirmBtn"], .QueuePanel_leaveModalConfirmBtn__ZtiIr');
-        if (confirmBtn && !isVisibleElement(confirmBtn)) confirmBtn = null;
-        if (!confirmBtn) {
-            confirmBtn = Array.from(document.querySelectorAll('button, [role="button"]')).find(el => {
-                if (!isVisibleElement(el)) return false;
-                const text = getElementText(el).toLowerCase();
-                return text === 'leave queue';
-            });
-        }
-        if (!confirmBtn) return false;
-        try {
-            confirmBtn.click();
-            console.log('[ArmSwitch] 已确认离开队列弹窗');
-            return true;
-        } catch (e) {
-            console.error('[ArmSwitch] 点击 Leave queue 确认失败:', e);
-            return false;
-        }
+        const btn = document.querySelector('button[class*="leaveModal"]') ||
+            Array.from(document.querySelectorAll('button, [role="button"]')).find(el =>
+                isVisibleElement(el) && getElementText(el).toLowerCase() === 'leave queue');
+        if (!btn) return false;
+        try { btn.click(); console.log('[ArmSwitch] confirmed leave queue'); return true; }
+        catch (e) { console.error('[ArmSwitch] leave confirm failed:', e); return false; }
     }
 
     function waitUntilQueueLeft(done, config, attempt) {
         if (!attempt) attempt = 0;
-        const modalStillOpen = hasLeaveQueueModal();
+        const modalOpen = hasLeaveQueueModal();
         const enterBtn = PX.Automation ? PX.Automation.findBtn(config.text.enter) : null;
         const queueBtn = PX.Automation ? PX.Automation.findBtn(config.text.queuing) : null;
-
-        if (!modalStillOpen && (enterBtn || !queueBtn)) {
-            console.log('[ArmSwitch] 已退出当前队列，可以切换手臂');
-            done(true);
-            return;
-        }
-
-        if (attempt >= 30) {
-            console.log('[ArmSwitch] 等待退出队列超时');
-            done(false);
-            return;
-        }
-
+        if (!modalOpen && (enterBtn || !queueBtn)) { done(true); return; }
+        if (attempt >= 30) { console.log('[ArmSwitch] wait-queue-left timeout'); done(false); return; }
         setTimeout(() => waitUntilQueueLeft(done, config, attempt + 1), 500);
     }
 
     function confirmLeaveAndWait(done, config, attempt) {
         if (!attempt) attempt = 0;
-        if (confirmLeaveQueueIfPresent()) {
-            setTimeout(() => waitUntilQueueLeft(done, config), 500);
-            return;
-        }
-        if (attempt >= 12) {
-            console.log('[ArmSwitch] 未检测到离队确认弹窗，继续等待退出状态');
-            waitUntilQueueLeft(done, config);
-            return;
-        }
+        if (confirmLeaveQueueIfPresent()) { setTimeout(() => waitUntilQueueLeft(done, config), 500); return; }
+        if (attempt >= 12) { waitUntilQueueLeft(done, config); return; }
         setTimeout(() => confirmLeaveAndWait(done, config, attempt + 1), 250);
     }
 
-    function clickEnterAfterLeave(config) {
-        const enter = PX.Automation ? PX.Automation.findBtn(config.text.enter) : null;
-        if (enter) {
-            try {
-                enter.click();
-                console.log('[ArmSwitch] 已重新进入队列');
-            } catch (e) {
-                console.error('[ArmSwitch] 重新进入队列失败:', e);
-            }
-        } else {
-            console.log('[ArmSwitch] 未找到重新进入按钮，等待主循环继续扫描');
-        }
-    }
-
-    function waitConfirmThenEnter(config, attempt) {
-        if (!attempt) attempt = 0;
-        if (confirmLeaveQueueIfPresent()) {
-            setTimeout(() => waitUntilQueueLeft(() => clickEnterAfterLeave(config), config), 500);
-            return;
-        }
-        if (attempt >= 10) {
-            console.log('[ArmSwitch] 未检测到离队确认弹窗，尝试直接重新进入');
-            waitUntilQueueLeft(() => clickEnterAfterLeave(config), config);
-            return;
-        }
-        setTimeout(() => waitConfirmThenEnter(config, attempt + 1), 250);
-    }
-
     function leaveQueueThenReenter(queueBtn, config) {
-        try { queueBtn.click(); } catch (e) {
-            console.error('[ArmSwitch] 点击离队按钮失败:', e);
-        }
-        setTimeout(() => waitConfirmThenEnter(config, 0), 250);
-    }
-
-    function waitLeaveConfirmThenSwitchArena(config, storage, attempt) {
-        if (!attempt) attempt = 0;
-        const cfg = config.armSwitchTask;
-
-        if (confirmLeaveQueueIfPresent() || attempt >= 10) {
-            waitUntilQueueLeft((leftOk) => {
-                if (!leftOk) {
-                    storage.setArmSwitchInProgress(false);
-                    PX._autoState.armSwitchInProgress = false;
-                    PX.Panel.updateUI('未能退出 Gold 队列，Arena 切换中止', '--', '--', '#ff3333', storage);
-                    return;
-                }
-                const avatarClicked = clickXPath(cfg.robotAvatarXPath, '左侧机器人头像');
-                setTimeout(() => {
-                    joinArenaArm(config, 0, (arenaClicked) => {
-                        if (arenaClicked) {
-                            storage.markArmSwitchDone();
-                            if (storage.setCurrentArm) storage.setCurrentArm('Arena Arm');
-                            PX.Panel.updateUI('已切换到 Arena Arm', '--', '--', '#00ff99', storage);
-                        } else {
-                            storage.setArmSwitchInProgress(false);
-                            PX.Panel.updateUI('Arena Arm 切换失败，等待重试', '--', '--', '#ff3333', storage);
-                        }
-                        PX._autoState.armSwitchInProgress = false;
-                        console.log(`[ArmSwitch] Arena Arm 切换完成 avatar=${avatarClicked} arena=${arenaClicked}`);
-                    });
-                }, cfg.afterAvatarDelay);
-            }, config);
-            return;
-        }
-        setTimeout(() => waitLeaveConfirmThenSwitchArena(config, storage, attempt + 1), 250);
+        try { queueBtn.click(); } catch (e) { console.error('[ArmSwitch] leave click failed:', e); }
+        setTimeout(() => {
+            const doEnter = () => {
+                const enter = PX.Automation ? PX.Automation.findBtn(config.text.enter) : null;
+                if (enter) { try { enter.click(); console.log('[ArmSwitch] re-entered queue'); } catch (e2) {} }
+                else { console.log('[ArmSwitch] no enter button, waiting for main loop'); }
+            };
+            confirmLeaveAndWait((ok) => { if (ok) doEnter(); }, config);
+        }, 250);
     }
 
     function switchToArenaArm(queueBtn, config, storage) {
         if (PX._autoState.armSwitchInProgress || storage.isArmSwitchInProgress()) return;
-        if (isQueuedOnArm('Arena Arm', config)) {
+        const arenaLabel = (config.armSwitchTask || {}).arenaArmLabel || 'Arena Arm';
+        if (isQueuedOnArm(arenaLabel, config)) {
             storage.markArmSwitchDone();
             storage.setArmSwitchInProgress(false);
             PX._autoState.armSwitchInProgress = false;
-            PX.Panel.updateUI('已在 Arena Arm 队列中，跳过重复切换', '--', '--', '#00ff99', storage);
-            console.log('[ArmSwitch] 已在 Arena 队列中，不重复加入');
+            PX.Panel.updateUI('already on Arena queue', '--', '--', '#00ff99', storage);
             return;
         }
         PX._autoState.armSwitchInProgress = true;
         storage.setArmSwitchInProgress(true);
         const attempts = getGoldAttemptCount(storage);
-        PX.Panel.updateUI(`Gold 已尝试 ${attempts} 次，切换 Arena Arm...`, '--', '--', '#66ccff', storage);
-        console.log(`[ArmSwitch] 开始切换到 Arena Arm，Gold 尝试次数=${attempts}`);
+        PX.Panel.updateUI('Gold ' + attempts + ' attempts, switching to Arena...', '--', '--', '#66ccff', storage);
+
+        const doSwitch = () => {
+            joinArenaArm(config, 0, (ok) => {
+                if (ok) {
+                    storage.markArmSwitchDone();
+                    if (storage.setCurrentArm) storage.setCurrentArm(arenaLabel);
+                    PX.Panel.updateUI('Switched to Arena Arm', '--', '--', '#00ff99', storage);
+                } else {
+                    storage.setArmSwitchInProgress(false);
+                    PX.Panel.updateUI('Arena switch failed, retrying', '--', '--', '#ff3333', storage);
+                }
+                PX._autoState.armSwitchInProgress = false;
+            });
+        };
 
         if (queueBtn) {
-            try { queueBtn.click(); } catch (e) {
-                console.error('[ArmSwitch] 点击离队按钮失败:', e);
-            }
-            setTimeout(() => waitLeaveConfirmThenSwitchArena(config, storage, 0), 250);
-        } else {
-            waitLeaveConfirmThenSwitchArena(config, storage, 10);
-        }
+            try { queueBtn.click(); } catch (e) {}
+            setTimeout(() => confirmLeaveAndWait((ok) => { if (ok) doSwitch(); else {
+                storage.setArmSwitchInProgress(false);
+                PX._autoState.armSwitchInProgress = false;
+            }}, config), 250);
+        } else { doSwitch(); }
     }
 
     function maybeSwitchToArenaArm(queueBtn, config, storage) {
@@ -353,83 +229,58 @@ var PX = PX || {};
 
     function returnToTrainingGold(queueBtn, config, storage, notifier) {
         const cfg = config.armSwitchTask;
-        if (isQueuedOnArm('Training Arm Gold', config)) {
-            storage.setCount(0);
-            storage.resetAnomaly();
+        const goldLabel = cfg.trainingGoldLabel || 'Training Arm Gold';
+        if (isQueuedOnArm(goldLabel, config)) {
+            storage.setCount(0); storage.resetAnomaly();
             if (storage.clearArmSwitchDone) storage.clearArmSwitchDone();
-            if (storage.setCurrentArm) storage.setCurrentArm('Training Arm Gold');
+            if (storage.setCurrentArm) storage.setCurrentArm(goldLabel);
             storage.setArmSwitchInProgress(false);
             PX._autoState.armSwitchInProgress = false;
             PX._autoState.morningRequeueActive = true;
-            PX.Panel.updateUI('已在 Training Arm Gold 队列中，跳过重复切换', '--', '--', '#00ff99', storage);
-            console.log('[ArmSwitch] 已在 Gold 队列中，不重复加入');
+            PX.Panel.updateUI('already on Gold queue', '--', '--', '#00ff99', storage);
             return;
         }
-        PX.Panel.updateUI('早八: 正在切回 Training Arm Gold...', '--', '--', '#66ccff', storage);
+        PX.Panel.updateUI('morning: switching to Gold...', '--', '--', '#66ccff', storage);
 
-        const switchGold = () => {
-            const avatarClicked = clickXPath(cfg.robotAvatarXPath, '左侧机器人头像');
-            setTimeout(() => {
-                joinTrainingGoldArm(config, 0, (goldClicked) => {
-                    if (goldClicked) {
-                        storage.setCount(0);
-                        storage.resetAnomaly();
-                        if (storage.clearArmSwitchDone) storage.clearArmSwitchDone();
-                        if (storage.setCurrentArm) storage.setCurrentArm('Training Arm Gold');
-                        storage.setArmSwitchInProgress(false);
-                        PX._autoState.armSwitchInProgress = false;
-                        PX._autoState.morningRequeueActive = true;
-                        const c = document.getElementById('p-count');
-                        if (c) c.innerText = "0";
-                        PX.Panel.updateAnomalyUI(storage);
-                        PX.Panel.updateUI('早八: 已切回 Training Arm Gold', '--', '--', '#00ff99', storage);
-                    } else {
-                        storage.setArmSwitchInProgress(false);
-                        PX._autoState.armSwitchInProgress = false;
-                        PX.Panel.updateUI('早八: 切回 Gold 失败，等待重试', '--', '--', '#ff3333', storage);
-                    }
-                    console.log(`[ArmSwitch] Gold 切换完成 avatar=${avatarClicked} gold=${goldClicked}`);
-                });
-            }, cfg.afterAvatarDelay);
+        const doSwitchGold = () => {
+            joinTrainingGoldArm(config, 0, (ok) => {
+                if (ok) {
+                    storage.setCount(0); storage.resetAnomaly();
+                    if (storage.clearArmSwitchDone) storage.clearArmSwitchDone();
+                    if (storage.setCurrentArm) storage.setCurrentArm(goldLabel);
+                    PX._autoState.morningRequeueActive = true;
+                    PX.Panel.updateUI('morning: switched to Gold', '--', '--', '#00ff99', storage);
+                } else {
+                    PX.Panel.updateUI('morning: Gold switch failed', '--', '--', '#ff3333', storage);
+                }
+                storage.setArmSwitchInProgress(false);
+                PX._autoState.armSwitchInProgress = false;
+            });
         };
 
         if (queueBtn) {
             PX._autoState.armSwitchInProgress = true;
             storage.setArmSwitchInProgress(true);
-            try { queueBtn.click(); } catch (e) {
-                console.error('[ArmSwitch] 点击离队按钮失败:', e);
-            }
-            setTimeout(() => confirmLeaveAndWait((leftOk) => {
-                if (!leftOk) {
-                    storage.setArmSwitchInProgress(false);
-                    PX._autoState.armSwitchInProgress = false;
-                    PX.Panel.updateUI('早八: 未能退出当前队列', '--', '--', '#ff3333', storage);
-                    return;
-                }
-                switchGold();
+            try { queueBtn.click(); } catch (e) {}
+            setTimeout(() => confirmLeaveAndWait((ok) => {
+                if (ok) doSwitchGold();
+                else { storage.setArmSwitchInProgress(false); PX._autoState.armSwitchInProgress = false; }
             }, config), 250);
-        } else {
-            switchGold();
-        }
+        } else { doSwitchGold(); }
     }
 
     function debugArenaArmSwitch(config, storage) {
-        const arena = findArmElement('Arena Arm', config.armSwitchTask.arenaArmXPath);
-        const gold = findArmElement('Training Arm Gold', config.armSwitchTask.trainingGoldArmXPath);
-        const avatar = getElementByXPath(config.armSwitchTask.robotAvatarXPath);
+        const cfg = config.armSwitchTask;
+        const arena = findArmCard(cfg.arenaArmLabel || 'Arena Arm');
+        const gold = findArmCard(cfg.trainingGoldLabel || 'Training Arm Gold');
         const queueBtn = PX.Automation ? PX.Automation.findBtn(config.text.queuing) : null;
         const result = {
-            avatarFound: !!avatar,
-            avatarVisible: !!avatar && isVisibleElement(avatar),
-            arenaFound: !!arena,
-            arenaVisible: !!arena && isVisibleElement(arena),
-            goldFound: !!gold,
-            goldVisible: !!gold && isVisibleElement(gold),
+            arenaFound: !!arena, goldFound: !!gold,
+            arenaVisible: !!(arena && isVisibleElement(arena)),
+            goldVisible: !!(gold && isVisibleElement(gold)),
             queueButtonFound: !!queueBtn,
-            activeArena: isActiveArm('Arena Arm'),
-            activeGold: isActiveArm('Training Arm Gold'),
-            queuedArena: isQueuedOnArm('Arena Arm', config),
-            queuedGold: isQueuedOnArm('Training Arm Gold', config),
+            queuedArena: isQueuedOnArm(cfg.arenaArmLabel || 'Arena Arm', config),
+            queuedGold: isQueuedOnArm(cfg.trainingGoldLabel || 'Training Arm Gold', config),
             goldAttempts: getGoldAttemptCount(storage),
             armSwitchDone: storage.isArmSwitchDone(),
             armSwitchInProgress: storage.isArmSwitchInProgress() || PX._autoState.armSwitchInProgress
@@ -439,25 +290,12 @@ var PX = PX || {};
     }
 
     PX.ArmSwitch = {
-        getElementByXPath: getElementByXPath,
-        isVisibleElement: isVisibleElement,
-        clickXPath: clickXPath,
-        clickElement: clickElement,
-        findArmElement: findArmElement,
-        joinArenaArm: joinArenaArm,
-        joinTrainingGoldArm: joinTrainingGoldArm,
-        confirmLeaveQueueIfPresent: confirmLeaveQueueIfPresent,
-        hasLeaveQueueModal: hasLeaveQueueModal,
-        waitUntilQueueLeft: waitUntilQueueLeft,
-        confirmLeaveAndWait: confirmLeaveAndWait,
-        clickEnterAfterLeave: clickEnterAfterLeave,
-        leaveQueueThenReenter: leaveQueueThenReenter,
-        switchToArenaArm: switchToArenaArm,
-        maybeSwitchToArenaArm: maybeSwitchToArenaArm,
-        returnToTrainingGold: returnToTrainingGold,
-        isActiveArm: isActiveArm,
-        isQueuedOnArm: isQueuedOnArm,
-        getGoldAttemptCount: getGoldAttemptCount,
-        debugArenaArmSwitch: debugArenaArmSwitch
+        isVisibleElement, clickElement, findArmCard, findJoinButtonInCard,
+        joinArenaArm, joinTrainingGoldArm,
+        confirmLeaveQueueIfPresent, hasLeaveQueueModal,
+        waitUntilQueueLeft, confirmLeaveAndWait,
+        leaveQueueThenReenter, switchToArenaArm, maybeSwitchToArenaArm,
+        returnToTrainingGold, isActiveArm, isQueuedOnArm,
+        getGoldAttemptCount, debugArenaArmSwitch
     };
 })();

@@ -55,9 +55,14 @@ var PX = PX || {};
         armSwitchTask: {
             enabled: true,
             successThreshold: 6,
-            robotAvatarXPath: '/html/body/div[1]/div/div[2]/div/div[2]/ul/li[3]',
-            trainingGoldArmXPath: '/html/body/div[1]/div/div[3]/div[2]/div/div/div[2]/div[2]',
-            arenaArmXPath: '/html/body/div[1]/div/div[3]/div[2]/div/div/div[2]/div[3]',
+            // v2: text-based selectors replace hardcoded XPaths
+            trainingGoldLabel: 'Training Arm Gold',
+            arenaArmLabel: 'Arena Arm',
+            armCardSelector: '[class*="TeleOpSelection_robotName"]',
+            armCardContainer: '[class*="TeleOpSelection_robotCard"]',
+            robotCenterURL: 'https://app.prismax.ai/robots-center',
+            liveControlURL: 'https://app.prismax.ai/live-control',
+            enterLiveControlSelector: 'button:has-text("Enter Live Control")',
             morningReturnToGold: true,
             afterLeaveDelay: 1200,
             afterAvatarDelay: 1200,
@@ -84,12 +89,15 @@ var PX = PX || {};
         },
 
         text: {
+            // v2: updated for new PrismaX UI flow
             enter: ["Enter Live Control", "Join Queue", "Enter Pool", "Begin Validating", "Start Validating", "Control Now"],
-            end: ["End Tele-Operation", "End Session", "End Control", "Stop Validating"],
-            queuing: ["Leave", "Leave Queue", "Waiting", "Position", "Queued", "In Queue"],
+            end: ["End Tele-Operation", "End Session", "End Control", "Stop Validating", "Leave Queue"],
+            queuing: ["Leave Queue", "Leave", "Waiting", "Position", "Queued", "In Queue"],
             liveChat: ["Live Chat", "Open Live Chat"],
             queue: ["Queue"],
-            blacklist: ["Discord", "Twitter", "Telegram", "Docs", "Whitepaper", "Log", "Sign"]
+            blacklist: ["Discord", "Twitter", "Telegram", "Docs", "Whitepaper", "Log", "Sign"],
+            // v2: arm card labels
+            armLabels: ["Training Arm Gold", "Arena Arm", "Training Arm Black", "Private Arm"]
         }
     };
 
