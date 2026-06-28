@@ -130,11 +130,13 @@ var PX = PX || {};
             return;
         }
 
-        // v2: ensure we're on the right page for queue operations
-        // If on data/review or dashboard, navigate to robots-center for arm selection
+        // v2: handle the full teleop flow
         const currentURL = window.location.href;
         const armCfg = config.armSwitchTask || {};
-        if (!currentURL.includes('/robots-center') && !currentURL.includes('/live-control')) {
+        const goldLabel = armCfg.trainingGoldLabel || 'Training Arm Gold';
+
+        // Step 1: if not on teleop pages, navigate to robots-center
+        if (!currentURL.includes('/robots-center') && !currentURL.includes('/tele-op') && !currentURL.includes('/live-control')) {
             console.log("[Morning] not on teleop page, navigating to robots-center...");
             PX.Panel.updateUI("早八: 跳转到机器人中心...", "--", "--", "#66ccff", storage);
             if (PX.ActionLock) PX.ActionLock.release('morning');
@@ -142,6 +144,21 @@ var PX = PX || {};
             return;
         }
 
+        // Step 2: if on robots-center, click the Gold arm card to enter tele-op
+        if (currentURL.includes('/robots-center')) {
+            console.log("[Morning] on robots-center, clicking " + goldLabel + " card...");
+            PX.Panel.updateUI("早八: 选择 " + goldLabel + "...", "--", "--", "#66ccff", storage);
+            const card = PX.ArmSwitch ? PX.ArmSwitch.findArmCard(goldLabel) : null;
+            if (card) {
+                try { card.click(); } catch (e) { console.error("[Morning] card click failed:", e); }
+            } else {
+                console.log("[Morning] arm card not found, retrying...");
+                PX.Panel.updateUI("早八: 等待臂卡片加载...", "--", "--", "#ff3333", storage);
+            }
+            return;
+        }
+
+        // Step 3: on tele-op page, look for queue/enter buttons
         const queueBtn = findBtn(config.text.queuing);
         const enterBtn = findBtn(config.text.enter);
 
