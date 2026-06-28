@@ -251,3 +251,20 @@ class ControlAdapterUnitTests(unittest.TestCase):
         adapter = PrismaXControlAdapter({})
         text = "Episode #1\nTask Prompt\npick up the cup and place it on the plate\nOther"
         self.assertEqual(adapter._extract_task_prompt(text), "pick up the cup and place it on the plate")
+
+
+class ConservativeVlaConfigTests(unittest.TestCase):
+    def test_live_capture_uses_more_frames_and_waits_for_ready_video(self) -> None:
+        config, _ = load_config(ROOT / "config.yaml")
+        live = config["live_capture"]
+        self.assertGreaterEqual(len(live["percent_points"]), 12)
+        self.assertGreaterEqual(live["wait_until_ready_seconds"], 8)
+        self.assertGreaterEqual(live["min_nonblack_ratio"], 0.70)
+        self.assertGreaterEqual(config["vlm"]["max_images"], 30)
+
+    def test_auto_decision_thresholds_are_conservative(self) -> None:
+        config, _ = load_config(ROOT / "config.yaml")
+        thresholds = config["decision_thresholds"]
+        self.assertGreaterEqual(thresholds["auto_pass_min_probability"], 0.90)
+        self.assertLessEqual(thresholds["auto_fail_max_probability"], 0.10)
+        self.assertGreaterEqual(thresholds["min_confidence_submit"], 0.90)

@@ -76,6 +76,7 @@ python .\prismax_auto_judge\main.py --live-step open-review
 python .\prismax_auto_judge\main.py --live-step open-first
 
 # 4. Capture key frames from the current VLA video page. No filling, no submit.
+# It prints capture_summary with frame counts and black_or_not_ready errors.
 python .\prismax_auto_judge\main.py --live-step capture
 
 # 5. Capture and ask the configured VLM for a score. No filling, no submit.
@@ -92,6 +93,7 @@ python .\prismax_auto_judge\main.py --live-step submit
 ```
 
 Default workflow now requires `min_control_operations_before_vla: 6`. Missing control state blocks VLA instead of silently continuing.
+Live capture waits for videos to become ready, warms playback briefly, samples 13 timeline points, and filters black frames. Auto-PASS/FAIL now requires `confidence >= 0.90`.
 
 ## Safety Rule
 

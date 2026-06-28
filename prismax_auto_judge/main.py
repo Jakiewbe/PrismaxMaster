@@ -189,6 +189,19 @@ def apply_live_mode(
     return control_record, auto_submit_count
 
 
+
+def print_capture_summary(episode: dict[str, Any]) -> None:
+    frame_paths = episode.get("frame_paths", {})
+    errors = episode.get("metadata", {}).get("capture_errors", [])
+    total = sum(len(paths) for paths in frame_paths.values())
+    print(f"capture_summary: frames={total} errors={len(errors)}")
+    for view, paths in frame_paths.items():
+        print(f"  {view}: {len(paths)} frames")
+    black_errors = [err for err in errors if "black_or_not_ready" in str(err)]
+    if black_errors:
+        print(f"  black_or_not_ready_errors={len(black_errors)}")
+
+
 def run_live_once(
     config: dict[str, Any],
     config_hash: str,
@@ -224,7 +237,7 @@ def run_live_once(
         if step == "open-first":
             return 0
         episode = adapter.capture_current_episode_frames()
-        print(f"captured frames: {sum(len(v) for v in episode.get('frame_paths', {}).values())}")
+        print_capture_summary(episode)
         if step == "capture":
             return 0
         result = score_captured_episode(scorer, episode)

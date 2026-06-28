@@ -37,8 +37,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "live_capture": {
         "enabled": True,
         "frame_dir": "data/frames/live",
-        "percent_points": [0, 10, 25, 50, 75, 90, 100],
+        "percent_points": [3, 8, 12, 18, 25, 35, 45, 55, 65, 75, 85, 92, 98],
         "view_names": ["main", "left_wrist", "right_wrist"],
+        "wait_until_ready_seconds": 8,
+        "warmup_play_seconds": 1.0,
+        "min_nonblack_ratio": 0.70,
     },
     "playback": {
         "enabled": True,
@@ -59,7 +62,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "timeout_seconds": 90,
         "max_retries": 2,
         "temperature": 0.0,
-        "max_images": 20,
+        "max_images": 30,
         "allow_text_only_primary": False,
         "response_dir": "data/logs/vlm_responses",
         "provider_profiles": {
@@ -161,9 +164,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "idle_ratio": {"hard_fail": None, "suspicious": 0.55},
     },
     "decision_thresholds": {
-        "auto_pass_min_probability": 0.86,
-        "auto_fail_max_probability": 0.25,
-        "min_confidence_submit": 0.78,
+        "auto_pass_min_probability": 0.90,
+        "auto_fail_max_probability": 0.10,
+        "min_confidence_submit": 0.90,
     },
     "safety": {
         "require_episode_id_match_before_submit": True,

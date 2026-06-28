@@ -312,54 +312,92 @@ class PrismaXControlAdapter:
 
         body = self._page.locator("body").inner_text()
         task_prompt = self._extract_task_prompt(body)
+        wait_seconds = float(capture_cfg.get("wait_until_ready_seconds", 8))
+        warmup_seconds = float(capture_cfg.get("warmup_play_seconds", 1.0))
+        min_nonblack_ratio = float(capture_cfg.get("min_nonblack_ratio", 0.70))
         captured = self._page.evaluate(
             """
-            async ({points}) => {
+            async ({points, waitSeconds, warmupSeconds}) => {
                 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-                const videos = Array.from(document.querySelectorAll('video')).filter(v => {
+                const visible = (v) => {
                     const rect = v.getBoundingClientRect();
                     const style = getComputedStyle(v);
                     return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
-                });
+                };
+                const waitReady = async (v) => {
+                    const deadline = Date.now() + waitSeconds * 1000;
+                    while (Date.now() < deadline) {
+                        if (visible(v) && v.videoWidth > 0 && v.videoHeight > 0 && Number.isFinite(v.duration) && v.duration > 0) return true;
+                        try { v.load && v.load(); } catch (e) {}
+                        await sleep(250);
+                    }
+                    return visible(v) && v.videoWidth > 0 && v.videoHeight > 0;
+                };
+                const seekTo = async (v, target) => {
+                    await new Promise((resolve, reject) => {
+                        let settled = false;
+                        const done = () => { if (!settled) { settled = true; cleanup(); resolve(); } };
+                        const fail = () => { if (!settled) { settled = true; cleanup(); reject(new Error('seek failed')); } };
+                        const cleanup = () => {
+                            v.removeEventListener('seeked', done);
+                            v.removeEventListener('error', fail);
+                        };
+                        v.addEventListener('seeked', done, {once: true});
+                        v.addEventListener('error', fail, {once: true});
+                        try { v.currentTime = target; } catch (err) { fail(); }
+                        setTimeout(done, 1800);
+                    });
+                    await sleep(180);
+                };
+                const capture = (v) => {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = v.videoWidth || Math.max(1, Math.floor(v.getBoundingClientRect().width));
+                    canvas.height = v.videoHeight || Math.max(1, Math.floor(v.getBoundingClientRect().height));
+                    const ctx = canvas.getContext('2d', {willReadFrequently: true});
+                    ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+                    const sample = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+                    let bright = 0;
+                    const step = Math.max(4, Math.floor(sample.length / 4000) * 4);
+                    let count = 0;
+                    for (let i = 0; i < sample.length; i += step) {
+                        if ((sample[i] + sample[i + 1] + sample[i + 2]) / 3 > 12) bright++;
+                        count++;
+                    }
+                    const nonBlackRatio = count ? bright / count : 0;
+                    return {dataUrl: canvas.toDataURL('image/jpeg', 0.88), nonBlackRatio};
+                };
+                const videos = Array.from(document.querySelectorAll('video')).filter(visible);
                 const output = [];
                 for (let i = 0; i < videos.length; i++) {
                     const v = videos[i];
+                    const ready = await waitReady(v);
+                    try {
+                        v.muted = true;
+                        await v.play().catch(() => null);
+                        await sleep(Math.max(0, warmupSeconds) * 1000);
+                        v.pause();
+                    } catch (e) {}
                     const duration = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0;
                     const frames = [];
                     for (const pct of points) {
                         try {
+                            if (!ready) throw new Error('video not ready');
                             if (duration > 0) {
-                                const target = Math.max(0, Math.min(duration - 0.05, duration * pct / 100));
-                                await new Promise((resolve, reject) => {
-                                    const done = () => { cleanup(); resolve(); };
-                                    const fail = () => { cleanup(); reject(new Error('seek failed')); };
-                                    const cleanup = () => {
-                                        v.removeEventListener('seeked', done);
-                                        v.removeEventListener('error', fail);
-                                    };
-                                    v.addEventListener('seeked', done, {once: true});
-                                    v.addEventListener('error', fail, {once: true});
-                                    v.currentTime = target;
-                                    setTimeout(done, 1500);
-                                });
-                                await sleep(120);
+                                const target = Math.max(0.05, Math.min(duration - 0.05, duration * pct / 100));
+                                await seekTo(v, target);
                             }
-                            const canvas = document.createElement('canvas');
-                            canvas.width = v.videoWidth || Math.max(1, Math.floor(v.getBoundingClientRect().width));
-                            canvas.height = v.videoHeight || Math.max(1, Math.floor(v.getBoundingClientRect().height));
-                            const ctx = canvas.getContext('2d');
-                            ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
-                            frames.push({percent: pct, dataUrl: canvas.toDataURL('image/jpeg', 0.88)});
+                            const shot = capture(v);
+                            frames.push({percent: pct, dataUrl: shot.dataUrl, nonBlackRatio: shot.nonBlackRatio});
                         } catch (err) {
                             frames.push({percent: pct, error: String(err && err.message || err)});
                         }
                     }
-                    output.push({index: i, src: v.currentSrc || v.src || '', frames});
+                    output.push({index: i, src: v.currentSrc || v.src || '', ready, duration, frames});
                 }
                 return output;
             }
             """,
-            {"points": points},
+            {"points": points, "waitSeconds": wait_seconds, "warmupSeconds": warmup_seconds},
         )
 
         frame_paths: dict[str, list[str]] = {}
@@ -373,6 +411,10 @@ class PrismaXControlAdapter:
             for frame in video.get("frames", []):
                 if frame.get("error"):
                     errors.append(f"{view}:{frame.get('percent')}:{frame.get('error')}")
+                    continue
+                nonblack = float(frame.get("nonBlackRatio") or 0.0)
+                if nonblack < min_nonblack_ratio:
+                    errors.append(f"{view}:{frame.get('percent')}:black_or_not_ready:{nonblack:.2f}")
                     continue
                 data_url = str(frame.get("dataUrl") or "")
                 if not data_url.startswith("data:image"):
@@ -396,6 +438,12 @@ class PrismaXControlAdapter:
                 "source": "prismax_live_page",
                 "url": self._page.url,
                 "capture_errors": errors,
+                "capture_config": {
+                    "percent_points": points,
+                    "wait_until_ready_seconds": wait_seconds,
+                    "warmup_play_seconds": warmup_seconds,
+                    "min_nonblack_ratio": min_nonblack_ratio,
+                },
                 "captured_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "progress": episode.get("progress"),
                 "task_id": episode.get("task_id"),
