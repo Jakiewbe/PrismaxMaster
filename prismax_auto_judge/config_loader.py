@@ -20,13 +20,25 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "daily_workflow": {
         "enabled": True,
         "control_first": True,
-        "min_control_operations_before_vla": 1,
+        "min_control_operations_before_vla": 6,
         "min_labels_per_day": 2,
         "max_labels_per_day": 4,
         "daily_counts_path": "data/logs/vla_daily_counts.json",
         "control_state_file": "../prismax_state.json",
-        "block_if_control_state_missing": False,
+        "block_if_control_state_missing": True,
         "api_keys_location": "python_env_only",
+    },
+    "post_vla": {
+        "return_to_arm_queue": True,
+        "target_arm_label": "Arena Arm",
+        "robot_center_url": "https://app.prismax.ai/robots-center",
+        "max_return_attempts": 3,
+    },
+    "live_capture": {
+        "enabled": True,
+        "frame_dir": "data/frames/live",
+        "percent_points": [0, 10, 25, 50, 75, 90, 100],
+        "view_names": ["main", "left_wrist", "right_wrist"],
     },
     "playback": {
         "enabled": True,

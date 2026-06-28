@@ -61,6 +61,38 @@ Outputs:
 - VLM request packages: `data/logs/vlm_requests`
 - VLM raw responses: `data/logs/vlm_responses`
 
+## Live Test Steps
+
+Run these one by one. They are ordered from safe to risky.
+
+```powershell
+# 1. Only check whether control has reached the configured threshold.
+python .\prismax_auto_judge\main.py --live-step workflow
+
+# 2. Connect to Chrome and open the VLA review list. No filling, no submit.
+python .\prismax_auto_judge\main.py --live-step open-review
+
+# 3. Open the first Review & Earn item. No filling, no submit.
+python .\prismax_auto_judge\main.py --live-step open-first
+
+# 4. Capture key frames from the current VLA video page. No filling, no submit.
+python .\prismax_auto_judge\main.py --live-step capture
+
+# 5. Capture and ask the configured VLM for a score. No filling, no submit.
+python .\prismax_auto_judge\main.py --live-step score
+
+# 6. Fill the form only. Set runtime.mode to assist_fill first. No submit.
+python .\prismax_auto_judge\main.py --live-step fill
+
+# 7. Test returning to the configured arm queue. This does not need the control threshold.
+python .\prismax_auto_judge\main.py --live-step return-arm
+
+# 8. Submit only when runtime.mode is auto_limited and dry runs look correct.
+python .\prismax_auto_judge\main.py --live-step submit
+```
+
+Default workflow now requires `min_control_operations_before_vla: 6`. Missing control state blocks VLA instead of silently continuing.
+
 ## Safety Rule
 
 Do not use `auto` or `auto_limited` until a real dry-run batch has been reviewed. Normal videos without a valid VLM result remain `UNCERTAIN` and are not submitted.

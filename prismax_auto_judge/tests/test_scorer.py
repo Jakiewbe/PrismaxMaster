@@ -194,6 +194,33 @@ class DailyWorkflowPolicyTests(unittest.TestCase):
             self.assertTrue(allowed)
             self.assertIn("control_state_missing_but_not_blocking", reason)
 
+    def test_daily_workflow_blocks_missing_control_state_in_default_config(self) -> None:
+        from workflow_policy import DailyWorkflowPolicy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.config["daily_workflow"]["control_state_file"] = "missing.json"
+            policy = DailyWorkflowPolicy(self.config, tmp)
+            allowed, reason = policy.is_control_ready()
+            self.assertFalse(allowed)
+            self.assertIn("control_state_missing", reason)
+
+    def test_daily_workflow_requires_six_control_operations(self) -> None:
+        from workflow_policy import DailyWorkflowPolicy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            state_path.write_text('{"totalOperations": 5}', encoding="utf-8")
+            self.config["daily_workflow"]["control_state_file"] = "state.json"
+            policy = DailyWorkflowPolicy(self.config, tmp)
+            allowed, reason = policy.is_control_ready()
+            self.assertFalse(allowed)
+            self.assertIn("5/6", reason)
+
+            state_path.write_text('{"totalOperations": 6}', encoding="utf-8")
+            allowed, reason = policy.is_control_ready()
+            self.assertTrue(allowed)
+            self.assertIn("6/6", reason)
+
 
 
 
@@ -215,3 +242,12 @@ class MainModeTests(unittest.TestCase):
         self.assertFalse(control["submitted"])
         self.assertEqual(control["submit_status"], "auto_fail_submit_disabled")
         self.assertEqual(count, 0)
+
+
+class ControlAdapterUnitTests(unittest.TestCase):
+    def test_extract_task_prompt_from_page_text(self) -> None:
+        from control_adapter import PrismaXControlAdapter
+
+        adapter = PrismaXControlAdapter({})
+        text = "Episode #1\nTask Prompt\npick up the cup and place it on the plate\nOther"
+        self.assertEqual(adapter._extract_task_prompt(text), "pick up the cup and place it on the plate")

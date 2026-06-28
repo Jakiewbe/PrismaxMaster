@@ -48,7 +48,7 @@ class PrismaXControlAdapter:
         # Verify logged in
         time.sleep(3)
         body = self._page.locator("body").inner_text()
-        logged_in_markers = ["All-Time Prisma Points", "Begin Validating", "Control Now", "Review & Earn"]
+        logged_in_markers = ["All-Time Prisma Points", "Begin Validating", "Control Now", "Review & Earn", "Data Review"]
         if not any(marker in body for marker in logged_in_markers):
             raise RuntimeError("Not logged in to PrismaX - please log in first")
 
@@ -290,6 +290,193 @@ class PrismaXControlAdapter:
             raise RuntimeError("Submit button still disabled — form not fully filled")
         btn.first.click()
         time.sleep(3)
+
+
+    def capture_current_episode_frames(self) -> dict[str, Any]:
+        """Capture key frames from visible review-page videos into local image files."""
+        import base64
+        import re as _re
+        import time
+
+        if not self._page:
+            raise RuntimeError("Browser page is not open")
+
+        episode = self.get_current_episode() or {"episode_id": "unknown"}
+        episode_id = str(episode.get("episode_id") or "unknown")
+        safe_episode_id = _re.sub(r"[^A-Za-z0-9_.-]+", "_", episode_id)
+        capture_cfg = self.config.get("live_capture", {})
+        points = capture_cfg.get("percent_points", [0, 10, 25, 50, 75, 90, 100])
+        view_names = capture_cfg.get("view_names", ["main", "left_wrist", "right_wrist"])
+        frame_root = self._resolve_package_path(capture_cfg.get("frame_dir", "data/frames/live")) / safe_episode_id
+        frame_root.mkdir(parents=True, exist_ok=True)
+
+        body = self._page.locator("body").inner_text()
+        task_prompt = self._extract_task_prompt(body)
+        captured = self._page.evaluate(
+            """
+            async ({points}) => {
+                const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+                const videos = Array.from(document.querySelectorAll('video')).filter(v => {
+                    const rect = v.getBoundingClientRect();
+                    const style = getComputedStyle(v);
+                    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+                });
+                const output = [];
+                for (let i = 0; i < videos.length; i++) {
+                    const v = videos[i];
+                    const duration = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0;
+                    const frames = [];
+                    for (const pct of points) {
+                        try {
+                            if (duration > 0) {
+                                const target = Math.max(0, Math.min(duration - 0.05, duration * pct / 100));
+                                await new Promise((resolve, reject) => {
+                                    const done = () => { cleanup(); resolve(); };
+                                    const fail = () => { cleanup(); reject(new Error('seek failed')); };
+                                    const cleanup = () => {
+                                        v.removeEventListener('seeked', done);
+                                        v.removeEventListener('error', fail);
+                                    };
+                                    v.addEventListener('seeked', done, {once: true});
+                                    v.addEventListener('error', fail, {once: true});
+                                    v.currentTime = target;
+                                    setTimeout(done, 1500);
+                                });
+                                await sleep(120);
+                            }
+                            const canvas = document.createElement('canvas');
+                            canvas.width = v.videoWidth || Math.max(1, Math.floor(v.getBoundingClientRect().width));
+                            canvas.height = v.videoHeight || Math.max(1, Math.floor(v.getBoundingClientRect().height));
+                            const ctx = canvas.getContext('2d');
+                            ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+                            frames.push({percent: pct, dataUrl: canvas.toDataURL('image/jpeg', 0.88)});
+                        } catch (err) {
+                            frames.push({percent: pct, error: String(err && err.message || err)});
+                        }
+                    }
+                    output.push({index: i, src: v.currentSrc || v.src || '', frames});
+                }
+                return output;
+            }
+            """,
+            {"points": points},
+        )
+
+        frame_paths: dict[str, list[str]] = {}
+        video_sources: dict[str, str] = {}
+        errors: list[str] = []
+        for video in captured:
+            idx = int(video.get("index", 0))
+            view = view_names[idx] if idx < len(view_names) else f"view_{idx}"
+            video_sources[view] = str(video.get("src") or "")
+            frame_paths[view] = []
+            for frame in video.get("frames", []):
+                if frame.get("error"):
+                    errors.append(f"{view}:{frame.get('percent')}:{frame.get('error')}")
+                    continue
+                data_url = str(frame.get("dataUrl") or "")
+                if not data_url.startswith("data:image"):
+                    errors.append(f"{view}:{frame.get('percent')}:empty_frame")
+                    continue
+                raw = data_url.split(",", 1)[1]
+                out = frame_root / f"{view}_{int(frame.get('percent', 0)):03d}.jpg"
+                out.write_bytes(base64.b64decode(raw))
+                frame_paths[view].append(str(out))
+
+        if not any(frame_paths.values()):
+            raise RuntimeError("No review video frames captured; browser canvas may be blocked")
+
+        return {
+            "episode_id": episode_id,
+            "task_prompt": task_prompt,
+            "video_paths": {},
+            "frame_paths": frame_paths,
+            "video_sources": video_sources,
+            "metadata": {
+                "source": "prismax_live_page",
+                "url": self._page.url,
+                "capture_errors": errors,
+                "captured_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "progress": episode.get("progress"),
+                "task_id": episode.get("task_id"),
+                "upload_id": episode.get("upload_id"),
+            },
+        }
+
+    def return_to_arm_queue(self, arm_label: str | None = None) -> bool:
+        """Navigate back to robots-center, select target arm, and join its queue."""
+        import time
+
+        if not self._page:
+            raise RuntimeError("Browser page is not open")
+        post_cfg = self.config.get("post_vla", {})
+        target = arm_label or post_cfg.get("target_arm_label") or "Arena Arm"
+        url = post_cfg.get("robot_center_url") or self.config.get("browser", {}).get("urls", {}).get(
+            "robot_center", "https://app.prismax.ai/robots-center"
+        )
+        attempts = int(post_cfg.get("max_return_attempts", 3))
+        self._page.goto(url, timeout=15000, wait_until="domcontentloaded")
+        time.sleep(3)
+        for _ in range(max(1, attempts)):
+            clicked = self._page.evaluate(
+                """
+                ({target}) => {
+                    const visible = (el) => {
+                        const style = getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                    };
+                    const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+                    const nodes = Array.from(document.querySelectorAll('button,[role="button"],a,div,section,article'));
+                    const labelNode = nodes.find(el => visible(el) && norm(el.innerText || el.textContent).includes(target));
+                    if (!labelNode) return {ok: false, reason: 'arm_not_found'};
+                    const card = labelNode.closest('[class*="robotCard"], [class*="card"], article, section') || labelNode;
+                    try { card.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
+                    try { card.click(); } catch (e) {}
+                    const controls = Array.from((card || document).querySelectorAll('button,[role="button"],a'));
+                    let join = controls.find(el => {
+                        if (!visible(el)) return false;
+                        if (el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+                        const text = norm([el.innerText, el.textContent, el.getAttribute('aria-label'), el.getAttribute('title')].filter(Boolean).join(' ')).toLowerCase();
+                        return /join|enter|start|begin|queue|control|入队|进入/.test(text) && !/leave/.test(text);
+                    });
+                    if (!join) {
+                        join = Array.from(document.querySelectorAll('button,[role="button"],a')).find(el => {
+                            if (!visible(el)) return false;
+                            if (el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+                            const text = norm([el.innerText, el.textContent, el.getAttribute('aria-label'), el.getAttribute('title')].filter(Boolean).join(' ')).toLowerCase();
+                            return /enter live control|join queue|enter pool|control now/.test(text) && !/leave/.test(text);
+                        });
+                    }
+                    if (!join) return {ok: false, reason: 'join_button_not_found'};
+                    try { join.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
+                    join.click();
+                    return {ok: true, reason: 'clicked_join', target};
+                }
+                """,
+                {"target": target},
+            )
+            if clicked and clicked.get("ok"):
+                time.sleep(3)
+                return True
+            time.sleep(2)
+        return False
+
+    def _extract_task_prompt(self, body_text: str) -> str:
+        lines = [line.strip() for line in body_text.splitlines() if line.strip()]
+        for idx, line in enumerate(lines):
+            lower = line.lower()
+            if any(key in lower for key in ["instruction", "task prompt", "task", "prompt"]):
+                if idx + 1 < len(lines):
+                    return lines[idx + 1][:500]
+                return line[:500]
+        return ""
+
+    def _resolve_package_path(self, value: str | Path) -> Path:
+        path = Path(value)
+        if path.is_absolute():
+            return path
+        return Path(__file__).resolve().parent / path
 
     def abort_submit(self, reason: str) -> None:
         raise RuntimeError(f"submit_aborted:{reason}")
