@@ -169,7 +169,16 @@ var PX = PX || {};
     }
 
     function findValidationEntryButton() {
-        return findClickableByKeywords(['Begin Validating', 'Start Validating', 'Control Now'], {
+        const configuredEnter = PX._config && PX._config.text ? PX._config.text.enter : [];
+        const keywords = Array.from(new Set([
+            ...configuredEnter,
+            'Enter Live Control',
+            'Join Queue',
+            'Begin Validating',
+            'Start Validating',
+            'Control Now'
+        ]));
+        return findClickableByKeywords(keywords, {
             blacklist: ['Connect Wallet', 'MetaMask', 'Phantom', 'OKX'],
             excludeLeave: true
         });
