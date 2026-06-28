@@ -294,7 +294,6 @@ class PrismaXControlAdapter:
 
     def capture_current_episode_frames(self) -> dict[str, Any]:
         """Capture key frames from visible review-page videos into local image files."""
-        import base64
         import re as _re
         import time
 
@@ -315,118 +314,55 @@ class PrismaXControlAdapter:
         wait_seconds = float(capture_cfg.get("wait_until_ready_seconds", 8))
         warmup_seconds = float(capture_cfg.get("warmup_play_seconds", 1.0))
         min_nonblack_ratio = float(capture_cfg.get("min_nonblack_ratio", 0.70))
-        captured = self._page.evaluate(
-            """
-            async ({points, waitSeconds, warmupSeconds}) => {
-                const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-                const visible = (v) => {
-                    const rect = v.getBoundingClientRect();
-                    const style = getComputedStyle(v);
-                    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
-                };
-                const waitReady = async (v) => {
-                    const deadline = Date.now() + waitSeconds * 1000;
-                    while (Date.now() < deadline) {
-                        if (visible(v) && v.videoWidth > 0 && v.videoHeight > 0 && Number.isFinite(v.duration) && v.duration > 0) return true;
-                        try { v.load && v.load(); } catch (e) {}
-                        await sleep(250);
-                    }
-                    return visible(v) && v.videoWidth > 0 && v.videoHeight > 0;
-                };
-                const seekTo = async (v, target) => {
-                    await new Promise((resolve, reject) => {
-                        let settled = false;
-                        const done = () => { if (!settled) { settled = true; cleanup(); resolve(); } };
-                        const fail = () => { if (!settled) { settled = true; cleanup(); reject(new Error('seek failed')); } };
-                        const cleanup = () => {
-                            v.removeEventListener('seeked', done);
-                            v.removeEventListener('error', fail);
-                        };
-                        v.addEventListener('seeked', done, {once: true});
-                        v.addEventListener('error', fail, {once: true});
-                        try { v.currentTime = target; } catch (err) { fail(); }
-                        setTimeout(done, 1800);
-                    });
-                    await sleep(180);
-                };
-                const capture = (v) => {
-                    const canvas = document.createElement('canvas');
-                    canvas.width = v.videoWidth || Math.max(1, Math.floor(v.getBoundingClientRect().width));
-                    canvas.height = v.videoHeight || Math.max(1, Math.floor(v.getBoundingClientRect().height));
-                    const ctx = canvas.getContext('2d', {willReadFrequently: true});
-                    ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
-                    const sample = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-                    let bright = 0;
-                    const step = Math.max(4, Math.floor(sample.length / 4000) * 4);
-                    let count = 0;
-                    for (let i = 0; i < sample.length; i += step) {
-                        if ((sample[i] + sample[i + 1] + sample[i + 2]) / 3 > 12) bright++;
-                        count++;
-                    }
-                    const nonBlackRatio = count ? bright / count : 0;
-                    return {dataUrl: canvas.toDataURL('image/jpeg', 0.88), nonBlackRatio};
-                };
-                const videos = Array.from(document.querySelectorAll('video')).filter(visible);
-                const output = [];
-                for (let i = 0; i < videos.length; i++) {
-                    const v = videos[i];
-                    const ready = await waitReady(v);
-                    try {
-                        v.muted = true;
-                        await v.play().catch(() => null);
-                        await sleep(Math.max(0, warmupSeconds) * 1000);
-                        v.pause();
-                    } catch (e) {}
-                    const duration = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0;
-                    const frames = [];
-                    for (const pct of points) {
-                        try {
-                            if (!ready) throw new Error('video not ready');
-                            if (duration > 0) {
-                                const target = Math.max(0.05, Math.min(duration - 0.05, duration * pct / 100));
-                                await seekTo(v, target);
-                            }
-                            const shot = capture(v);
-                            frames.push({percent: pct, dataUrl: shot.dataUrl, nonBlackRatio: shot.nonBlackRatio});
-                        } catch (err) {
-                            frames.push({percent: pct, error: String(err && err.message || err)});
-                        }
-                    }
-                    output.push({index: i, src: v.currentSrc || v.src || '', ready, duration, frames});
-                }
-                return output;
-            }
-            """,
-            {"points": points, "waitSeconds": wait_seconds, "warmupSeconds": warmup_seconds},
-        )
+        video_count = int(self._page.evaluate("""
+            () => Array.from(document.querySelectorAll('video')).filter(v => {
+                const rect = v.getBoundingClientRect();
+                const style = getComputedStyle(v);
+                return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+            }).length
+        """))
 
         frame_paths: dict[str, list[str]] = {}
         video_sources: dict[str, str] = {}
         errors: list[str] = []
-        for video in captured:
-            idx = int(video.get("index", 0))
+        for idx in range(video_count):
             view = view_names[idx] if idx < len(view_names) else f"view_{idx}"
-            video_sources[view] = str(video.get("src") or "")
             frame_paths[view] = []
-            for frame in video.get("frames", []):
-                if frame.get("error"):
-                    errors.append(f"{view}:{frame.get('percent')}:{frame.get('error')}")
-                    continue
-                nonblack = float(frame.get("nonBlackRatio") or 0.0)
-                if nonblack < min_nonblack_ratio:
-                    errors.append(f"{view}:{frame.get('percent')}:black_or_not_ready:{nonblack:.2f}")
-                    continue
-                data_url = str(frame.get("dataUrl") or "")
-                if not data_url.startswith("data:image"):
-                    errors.append(f"{view}:{frame.get('percent')}:empty_frame")
-                    continue
-                raw = data_url.split(",", 1)[1]
-                out = frame_root / f"{view}_{int(frame.get('percent', 0)):03d}.jpg"
-                out.write_bytes(base64.b64decode(raw))
-                frame_paths[view].append(str(out))
+            for pct in points:
+                try:
+                    meta = self._seek_video_and_get_clip(idx, float(pct), wait_seconds, warmup_seconds)
+                    video_sources[view] = str(meta.get("src") or "")
+                    clip = meta.get("clip") or {}
+                    if not meta.get("ok"):
+                        errors.append(f"{view}:{pct}:{meta.get('error', 'seek_failed')}")
+                        continue
+                    out = frame_root / f"{view}_{int(pct):03d}.jpg"
+                    self._page.screenshot(
+                        path=str(out),
+                        clip={
+                            "x": max(0, float(clip.get("x", 0))),
+                            "y": max(0, float(clip.get("y", 0))),
+                            "width": max(1, float(clip.get("width", 1))),
+                            "height": max(1, float(clip.get("height", 1))),
+                        },
+                        type="jpeg",
+                        quality=88,
+                        timeout=5000,
+                    )
+                    nonblack = self._image_nonblack_ratio(out)
+                    if nonblack < min_nonblack_ratio:
+                        errors.append(f"{view}:{pct}:black_or_not_ready:{nonblack:.2f}")
+                        try:
+                            out.unlink()
+                        except OSError:
+                            pass
+                        continue
+                    frame_paths[view].append(str(out))
+                except Exception as exc:
+                    errors.append(f"{view}:{pct}:{type(exc).__name__}:{exc}")
 
         if not any(frame_paths.values()):
-            raise RuntimeError("No review video frames captured; browser canvas may be blocked")
+            raise RuntimeError("No review video frames captured; page screenshot fallback failed")
 
         return {
             "episode_id": episode_id,
@@ -437,6 +373,7 @@ class PrismaXControlAdapter:
             "metadata": {
                 "source": "prismax_live_page",
                 "url": self._page.url,
+                "capture_method": "page_screenshot_clip",
                 "capture_errors": errors,
                 "capture_config": {
                     "percent_points": points,
@@ -450,6 +387,83 @@ class PrismaXControlAdapter:
                 "upload_id": episode.get("upload_id"),
             },
         }
+
+    def _seek_video_and_get_clip(self, index: int, percent: float, wait_seconds: float, warmup_seconds: float) -> dict[str, Any]:
+        if not self._page:
+            raise RuntimeError("Browser page is not open")
+        return self._page.evaluate(
+            """
+            async ({index, percent, waitSeconds, warmupSeconds}) => {
+                const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+                const visible = (v) => {
+                    const rect = v.getBoundingClientRect();
+                    const style = getComputedStyle(v);
+                    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+                };
+                const videos = Array.from(document.querySelectorAll('video')).filter(visible);
+                const v = videos[index];
+                if (!v) return {ok: false, error: 'video_not_found'};
+                try { v.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
+                const deadline = Date.now() + waitSeconds * 1000;
+                while (Date.now() < deadline) {
+                    if (visible(v) && v.videoWidth > 0 && v.videoHeight > 0 && Number.isFinite(v.duration) && v.duration > 0) break;
+                    try { v.load && v.load(); } catch (e) {}
+                    await sleep(250);
+                }
+                if (!(v.videoWidth > 0 && v.videoHeight > 0)) return {ok: false, error: 'video_not_ready'};
+                try {
+                    v.muted = true;
+                    await v.play().catch(() => null);
+                    await sleep(Math.max(0, warmupSeconds) * 1000);
+                    v.pause();
+                } catch (e) {}
+                const duration = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0;
+                if (duration > 0) {
+                    const target = Math.max(0.05, Math.min(duration - 0.05, duration * percent / 100));
+                    await new Promise((resolve, reject) => {
+                        let settled = false;
+                        const done = () => { if (!settled) { settled = true; cleanup(); resolve(); } };
+                        const fail = () => { if (!settled) { settled = true; cleanup(); reject(new Error('seek failed')); } };
+                        const cleanup = () => {
+                            v.removeEventListener('seeked', done);
+                            v.removeEventListener('error', fail);
+                        };
+                        v.addEventListener('seeked', done, {once: true});
+                        v.addEventListener('error', fail, {once: true});
+                        try { v.currentTime = target; } catch (err) { fail(); }
+                        setTimeout(done, 1800);
+                    });
+                    await sleep(200);
+                }
+                try { v.scrollIntoView({block: 'center', inline: 'center'}); } catch (e) {}
+                await sleep(100);
+                const rect = v.getBoundingClientRect();
+                return {
+                    ok: true,
+                    src: v.currentSrc || v.src || '',
+                    duration,
+                    clip: {
+                        x: rect.left + window.scrollX,
+                        y: rect.top + window.scrollY,
+                        width: rect.width,
+                        height: rect.height,
+                    },
+                };
+            }
+            """,
+            {"index": index, "percent": percent, "waitSeconds": wait_seconds, "warmupSeconds": warmup_seconds},
+        )
+
+    def _image_nonblack_ratio(self, path: Path) -> float:
+        try:
+            import cv2  # type: ignore
+            img = cv2.imread(str(path))
+            if img is None or img.size == 0:
+                return 0.0
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            return float((gray > 12).sum()) / float(gray.size)
+        except Exception:
+            return 1.0
 
     def return_to_arm_queue(self, arm_label: str | None = None) -> bool:
         """Navigate back to robots-center, select target arm, and join its queue."""

@@ -268,3 +268,19 @@ class ConservativeVlaConfigTests(unittest.TestCase):
         self.assertGreaterEqual(thresholds["auto_pass_min_probability"], 0.90)
         self.assertLessEqual(thresholds["auto_fail_max_probability"], 0.10)
         self.assertGreaterEqual(thresholds["min_confidence_submit"], 0.90)
+
+
+class LiveWorkflowStepTests(unittest.TestCase):
+    def test_readonly_live_steps_are_documented_for_workflow_bypass(self) -> None:
+        from main import run_live_once
+
+        source_names = run_live_once.__code__.co_consts
+        self.assertIn("open-review", str(source_names))
+        self.assertIn("capture", str(source_names))
+        self.assertIn("return-arm", str(source_names))
+
+    def test_control_adapter_uses_page_screenshot_capture_helpers(self) -> None:
+        from control_adapter import PrismaXControlAdapter
+
+        self.assertTrue(hasattr(PrismaXControlAdapter, "_seek_video_and_get_clip"))
+        self.assertTrue(hasattr(PrismaXControlAdapter, "_image_nonblack_ratio"))

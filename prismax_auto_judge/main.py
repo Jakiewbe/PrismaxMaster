@@ -215,7 +215,8 @@ def run_live_once(
     print(f"workflow: {reason}")
     if step == "workflow":
         return 0 if allowed else 2
-    if not allowed and step != "return-arm":
+    readonly_steps = {"open-review", "open-first", "capture", "score", "return-arm"}
+    if not allowed and step not in readonly_steps:
         return 2
 
     adapter = PrismaXControlAdapter(config)
