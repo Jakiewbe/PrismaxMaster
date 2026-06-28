@@ -75,6 +75,7 @@ var PX = PX || {};
         for (const el of candidates) {
             const actionEl = toActionElement(el);
             if (!isVisibleElement(actionEl)) continue;
+            if (actionEl.disabled || actionEl.getAttribute('aria-disabled') === 'true') continue;
             if (actionEl.tagName === 'A' || actionEl.closest('a')) continue;
 
             const text = getElementText(actionEl);
