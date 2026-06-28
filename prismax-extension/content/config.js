@@ -89,9 +89,9 @@ var PX = PX || {};
         },
 
         text: {
-            // v2: updated for new PrismaX UI flow
+            // v2: updated for new PrismaX UI flow. 'Leave Queue' only in queuing (NOT end).
             enter: ["Enter Live Control", "Join Queue", "Enter Pool", "Begin Validating", "Start Validating", "Control Now"],
-            end: ["End Tele-Operation", "End Session", "End Control", "Stop Validating", "Leave Queue"],
+            end: ["End Tele-Operation", "End Session", "End Control", "Stop Validating"],
             queuing: ["Leave Queue", "Leave", "Waiting", "Position", "Queued", "In Queue"],
             liveChat: ["Live Chat", "Open Live Chat"],
             queue: ["Queue"],
