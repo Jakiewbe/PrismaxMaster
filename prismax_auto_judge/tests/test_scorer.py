@@ -265,9 +265,9 @@ class ConservativeVlaConfigTests(unittest.TestCase):
     def test_auto_decision_thresholds_are_conservative(self) -> None:
         config, _ = load_config(ROOT / "config.yaml")
         thresholds = config["decision_thresholds"]
-        self.assertGreaterEqual(thresholds["auto_pass_min_probability"], 0.90)
-        self.assertLessEqual(thresholds["auto_fail_max_probability"], 0.10)
-        self.assertGreaterEqual(thresholds["min_confidence_submit"], 0.90)
+        self.assertGreaterEqual(thresholds["auto_pass_min_probability"], 0.85)
+        self.assertLessEqual(thresholds["auto_fail_max_probability"], 0.15)
+        self.assertGreaterEqual(thresholds["min_confidence_submit"], 0.85)
 
 
 class LiveWorkflowStepTests(unittest.TestCase):

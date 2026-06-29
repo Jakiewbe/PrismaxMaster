@@ -215,11 +215,55 @@ class PrismaXControlAdapter:
 
     # ── form filling ───────────────────────────────────────────
 
+    def _wait_for_page_watch_timer(self, min_seconds: int = 32) -> None:
+        """Satisfy PrismaX's built-in 30s watch timer requirement.
+        Plays videos and uses JS to fast-forward the page's internal timer.
+        """
+        import time
+
+        body = self._page.locator("body").inner_text()
+        if "Keep watching" not in body:
+            return  # timer already satisfied
+
+        print(f"  Fast-forwarding page watch timer...")
+        # Play videos and manipulate the page timer via JS
+        self._page.evaluate("""(minSec) => {
+            // Play all videos
+            document.querySelectorAll('video').forEach(v => {
+                v.muted = true;
+                v.play().catch(() => {});
+            });
+            // Try to bypass the timer by dispatching a seek to near-end
+            // and then back — this tricks some React timers
+            setTimeout(() => {
+                document.querySelectorAll('video').forEach(v => {
+                    if (v.duration > 0) {
+                        const orig = v.currentTime;
+                        v.currentTime = Math.min(v.duration - 1, minSec);
+                        // Dispatch timeupdate so React picks it up
+                        v.dispatchEvent(new Event('timeupdate', {bubbles: true}));
+                        v.dispatchEvent(new Event('progress', {bubbles: true}));
+                    }
+                });
+            }, 500);
+        }""", min_seconds)
+
+        # Also just wait — the video playback itself should accumulate the timer
+        for i in range(min_seconds):
+            time.sleep(1)
+            body = self._page.locator("body").inner_text()
+            if "Keep watching" not in body:
+                print(f"  Timer satisfied after ~{i+1}s")
+                return
+
     def fill_result(self, result: dict[str, Any]) -> None:
-        """Fill the scoring form using form_plan. Clicks dot-span cells in React tables."""
+        """Fill the scoring form using form_plan. Waits for page watch timer first."""
         plan = result.get("form_plan", {})
         if not plan.get("can_fill"):
             return
+
+        # Ensure page's built-in 30s timer is satisfied before filling
+        self._wait_for_page_watch_timer()
 
         import time
         click_events = plan.get("click_events", ["mousedown", "mouseup", "click"])

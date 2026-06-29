@@ -1,5 +1,5 @@
 runtime:
-  mode: "dry_run"  # dry_run / assist_preview / assist_fill / auto / auto_limited
+  mode: "assist_fill"  # dry_run / assist_preview / assist_fill / auto / auto_limited
   auto_submit: false
   skip_uncertain: true
   save_log: true
