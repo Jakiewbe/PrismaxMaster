@@ -87,7 +87,7 @@ class PrismaXControlAdapter:
     # ── navigation ─────────────────────────────────────────────
 
     def _open_review_list(self) -> None:
-        """Open the current Data Review list from dashboard/banner/carousel UI."""
+        """Open the current Data Review list — tries direct URL first, then UI path."""
         import time
 
         if not self._page:
@@ -100,6 +100,18 @@ class PrismaXControlAdapter:
         if is_review_list_url(self._page.url):
             return
 
+        # v2: try direct URL first (bypasses Connect modal issues)
+        self._page.goto(review_list_url, timeout=20000, wait_until="domcontentloaded")
+        time.sleep(4)
+        # Dismiss any overlay
+        self._page.evaluate("""() => {
+            document.querySelectorAll('[class*="overlay"], [class*="Overlay"], [class*="modal"], [class*="Modal"]').forEach(e => e.remove());
+        }""")
+        time.sleep(1)
+        if self._page.locator("button:has-text('Review & Earn')").count() > 0:
+            return
+
+        # Fallback: legacy UI flow
         selectors = self.config.get("browser", {}).get("selectors", {})
         candidate_selectors = selectors.get("validation_entry_buttons") or [
             "button:has-text('Begin Validating')",
@@ -360,9 +372,36 @@ class PrismaXControlAdapter:
         body = self._page.locator("body").inner_text()
         task_prompt = self._extract_task_prompt(body)
 
+        # Phase 1: real playback to satisfy page watch timer
         if capture_cfg.get("playback", {}).get("enabled", True):
-            return self._capture_with_playback(episode_id, safe_episode_id, task_prompt, frame_root, view_names, capture_cfg)
+            self._satisfy_page_timer()
+        # Phase 2: deterministic seek-based capture for consistent VLM scoring
         return self._capture_with_seek(episode_id, safe_episode_id, task_prompt, frame_root, view_names, capture_cfg)
+
+    def _satisfy_page_timer(self, min_seconds: int = 32) -> None:
+        """Play videos to satisfy PrismaX's 30s watch timer requirement.
+        Does NOT capture frames — that's done separately with deterministic seek.
+        """
+        import time
+        body = self._page.locator("body").inner_text()
+        if "Keep watching" not in body and "Time watched" not in body:
+            return
+
+        self._page.evaluate("""() => {
+            const o = document.querySelector('[class*="playOverlay"]');
+            if (o) o.click();
+        }""")
+        time.sleep(1)
+        self._page.evaluate("""() => {
+            document.querySelectorAll('video').forEach(v => {
+                v.muted = true; v.play().catch(() => {});
+            });
+        }""")
+        for i in range(min_seconds):
+            time.sleep(1)
+            body = self._page.locator("body").inner_text()
+            if "Keep watching" not in body:
+                return
 
     # ── playback mode ──────────────────────────────────────────
 
@@ -555,6 +594,20 @@ class PrismaXControlAdapter:
         points = capture_cfg.get("percent_points", [0, 10, 25, 50, 75, 90, 100])
         wait_seconds = float(capture_cfg.get("wait_until_ready_seconds", 8))
         warmup_seconds = float(capture_cfg.get("warmup_play_seconds", 1.0))
+
+        # Ensure videos are loaded before seeking (may have been paused/ended by timer playback)
+        self._page.evaluate("""() => {
+            const o = document.querySelector('[class*="playOverlay"]');
+            if (o) o.click();
+        }""")
+        time.sleep(1.5)
+        self._page.evaluate("""() => {
+            document.querySelectorAll('video').forEach(v => {
+                v.muted = true; v.currentTime = 0;
+                v.play().catch(() => {});
+            });
+        }""")
+        time.sleep(2)
         min_nonblack_ratio = float(capture_cfg.get("min_nonblack_ratio", 0.70))
         video_count = int(self._page.evaluate("""
             () => Array.from(document.querySelectorAll('video')).filter(v => {
@@ -618,9 +671,7 @@ class PrismaXControlAdapter:
                     "min_nonblack_ratio": min_nonblack_ratio,
                 },
                 "captured_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "progress": episode.get("progress"),
-                "task_id": episode.get("task_id"),
-                "upload_id": episode.get("upload_id"),
+                "episode_id": episode_id,
             },
         }
 
