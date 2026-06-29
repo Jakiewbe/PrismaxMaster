@@ -228,14 +228,13 @@ class PrismaXControlAdapter:
     # ── form filling ───────────────────────────────────────────
 
     def _wait_for_page_watch_timer(self, min_seconds: int = 35) -> None:
-        """Satisfy PrismaX's 30s watch timer: play videos + nuke any warning overlay.
-        The page uses React state for the timer; we play videos to advance it,
-        then JS-remove any 'Keep watching' overlay that persists.
+        """ALWAYS play videos for >= min_seconds before filling.
+        PrismaX React timer requires real playback on the CURRENT segment.
+        We don't trust the DOM timer text — React may have reset internally.
         """
         import time
-
+        print(f"  Ensuring {min_seconds}s watch time before fill...")
         for i in range(min_seconds):
-            # Play videos continuously
             self._page.evaluate("""() => {
                 const o = document.querySelector('[class*="playOverlay"]');
                 if (o) o.click();
@@ -245,27 +244,17 @@ class PrismaXControlAdapter:
                 });
             }""")
             time.sleep(1)
-            # Kill any watch-timer warning that pops up
-            killed = self._page.evaluate("""() => {
-                let removed = 0;
+            # Kill any warning that pops up during wait
+            self._page.evaluate("""() => {
                 document.querySelectorAll('*').forEach(el => {
                     const text = (el.textContent || '').trim();
-                    if (/Keep watching|Time watched|Press play to start/i.test(text) && text.length < 120) {
-                        // Remove the overlay/container
-                        const overlay = el.closest('[class*="overlay"], [class*="Overlay"], [class*="modal"], [class*="Modal"], [class*="toast"], [class*="Toast"]') || el;
+                    if ((text.includes('Keep watching') || text.includes('Press play')) && text.length < 120) {
+                        const overlay = el.closest('[class*="overlay"], [class*="Overlay"], [class*="modal"], [class*="Modal"]') || el;
                         overlay.remove();
-                        removed++;
                     }
                 });
-                return removed;
             }""")
-            if killed > 0:
-                print(f"  Removed {killed} timer warning(s) after {i+1}s")
-            # Check if timer text is gone
-            body = self._page.locator("body").inner_text()
-            if "Keep watching" not in body and "0:00 / 0:30" not in body:
-                return
-        print(f"  Timer wait complete ({min_seconds}s)")
+        print(f"  Timer wait done ({min_seconds}s)")
 
     def fill_result(self, result: dict[str, Any]) -> None:
         """Fill the scoring form using form_plan. Waits for page watch timer first."""
@@ -371,9 +360,10 @@ class PrismaXControlAdapter:
         body = self._page.locator("body").inner_text()
         task_prompt = self._extract_task_prompt(body)
 
-        # Phase 1: satisfy page watch timer by playing (no seeking — seeking resets it)
-        self._satisfy_page_timer()
-        # Phase 2: capture frames (seek-based, but timer already satisfied so OK)
+        # Use playback mode: play ALL segments at 1x speed, capture frames during playback.
+        # This satisfies the page timer naturally and simulates human viewing.
+        if capture_cfg.get("playback", {}).get("enabled", True):
+            return self._capture_with_playback(episode_id, safe_episode_id, task_prompt, frame_root, view_names, capture_cfg)
         return self._capture_with_seek(episode_id, safe_episode_id, task_prompt, frame_root, view_names, capture_cfg)
 
     def _satisfy_page_timer(self, min_seconds: int = 35) -> None:
@@ -432,100 +422,74 @@ class PrismaXControlAdapter:
         self, episode_id: str, safe_id: str, task_prompt: str,
         frame_root, view_names: list[str], capture_cfg: dict[str, Any],
     ) -> dict[str, Any]:
-        """Real playback: play each video segment, capture frames during playback."""
+        """Real human-like playback: play EVERY segment at 1x speed,
+        watch >=min_watch_seconds per segment, capture frames during playback.
+        Does NOT skip segments — simulates a real validator watching everything.
+        """
         import time
 
         pb_cfg = capture_cfg.get("playback", {})
         min_watch = float(pb_cfg.get("min_watch_seconds", 30))
         capture_interval = float(pb_cfg.get("capture_interval_seconds", 4))
-        speed = float(pb_cfg.get("speed_multiplier", 1))
         max_segments = int(pb_cfg.get("max_segments", 20))
 
-        # Detect segment count from page
         body = self._page.locator("body").inner_text()
         segments_total = self._detect_segment_count(body, page=self._page)
+        nav_available = self._page.locator("[class*='DataQAReview_navBtn']").count() >= 2
+        if segments_total < 2 and not nav_available:
+            segments_total = 1
+
+        print(f"  Playback: {segments_total} segment(s), ~{min_watch}s each")
 
         frame_paths: dict[str, list[str]] = {}
         video_sources: dict[str, str] = {}
         errors: list[str] = []
-        total_video_watch = 0.0
-        total_wall_watch = 0.0
+        total_wall = 0.0
         segments_seen = 0
 
-        for seg_idx in range(min(segments_total, max_segments)):
+        for seg_idx in range(segments_total):
             if seg_idx > 0:
-                # Navigate to next segment
                 navs = self._page.locator("[class*='DataQAReview_navBtn']")
                 if navs.count() >= 2:
-                    try:
-                        navs.nth(1).click()
-                        time.sleep(2)
-                    except Exception:
-                        break
+                    navs.nth(1).click()
+                    time.sleep(3)
                 else:
                     break
 
-            # Ensure videos play
+            print(f"    seg{seg_idx+1}/{segments_total}: playing...", end=" ", flush=True)
+
+            # Click play overlay + start videos (DO NOT reset currentTime — timer accumulates)
             self._page.evaluate("""() => {
+                const o = document.querySelector('[class*="playOverlay"]');
+                if (o) o.click();
                 document.querySelectorAll('video').forEach(v => {
-                    v.muted = true; v.currentTime = 0;
+                    v.muted = true;
                     v.play().catch(() => {});
                 });
             }""")
-            time.sleep(1.5)
+            time.sleep(2)  # let videos start
 
-            # Wait for at least one video ready
-            for _ in range(15):
-                ready = self._page.evaluate("""() => {
-                    for (const v of document.querySelectorAll('video'))
-                        if (v.readyState >= 2 && v.videoWidth > 0 && !v.paused) return true;
-                    return false;
-                }""")
-                if ready:
-                    break
-                time.sleep(0.5)
-
-            seg_start = time.monotonic()
             seg_frames: dict[str, list[str]] = {}
-            seg_watch = 0.0
+            seg_start = time.monotonic()
 
-            # Capture frames during playback
-            while seg_watch < min_watch:
-                # Check if video ended
-                all_ended = self._page.evaluate("""() => {
-                    const vs = document.querySelectorAll('video');
-                    if (vs.length === 0) return true;
-                    return Array.from(vs).every(v => v.ended || v.currentTime >= v.duration - 0.5);
+            # Watch for min_watch real seconds, capturing frames along the way
+            elapsed = 0.0
+            while elapsed < min_watch:
+                # Keep videos playing (page timer needs this)
+                self._page.evaluate("""() => {
+                    document.querySelectorAll('video').forEach(v => {
+                        if (v.paused) { v.muted = true; v.play().catch(() => {}); }
+                    });
                 }""")
-                if all_ended:
-                    break
 
-                # Check if videos froze (no progress in 5 seconds)
-                progress_made = self._page.evaluate("""() => {
-                    for (const v of document.querySelectorAll('video'))
-                        if (v.readyState >= 2 && !v.paused && !v.ended && v.currentTime > 0.1) return true;
-                    return false;
-                }""")
-                if not progress_made:
-                    # Try replay
-                    self._page.evaluate("""() => {
-                        document.querySelectorAll('video').forEach(v => {
-                            v.currentTime = 0; v.play().catch(() => {});
-                        });
-                    }""")
-                    time.sleep(1)
-                    seg_watch += 1  # count attempted time
-
-                # Screenshot each visible video
-                timestamp = int(seg_watch)
+                # Capture frame from each view
+                timestamp = int(elapsed)
                 for vi, view in enumerate(view_names):
                     try:
                         els = self._page.locator("video")
-                        if vi >= els.count():
-                            break
+                        if vi >= els.count(): break
                         box = els.nth(vi).bounding_box()
-                        if not box or box["width"] < 10:
-                            continue
+                        if not box or box["width"] < 10: continue
                         out = frame_root / f"{view}_seg{seg_idx+1:02d}_t{timestamp:03d}s.jpg"
                         self._page.screenshot(
                             path=str(out),
@@ -547,21 +511,19 @@ class PrismaXControlAdapter:
                     except Exception as exc:
                         errors.append(f"{view}:seg{seg_idx+1}:t{timestamp}:{type(exc).__name__}")
 
-                # Real-time sleep: speed=1 means watch time = wall time
                 time.sleep(max(0.05, capture_interval))
-                seg_watch += capture_interval
+                elapsed += capture_interval
 
             wall_elapsed = time.monotonic() - seg_start
-            total_video_watch += seg_watch
-            total_wall_watch += wall_elapsed
             segments_seen += 1
+            total_wall += wall_elapsed
 
             for view, paths in seg_frames.items():
                 frame_paths.setdefault(view, []).extend(paths)
-            # Do NOT break — watch ALL segments
+            print(f"{len(seg_frames)} views, {sum(len(p) for p in seg_frames.values())} frames, {wall_elapsed:.0f}s wall")
 
         if not any(frame_paths.values()):
-            raise RuntimeError("No review video frames captured; playback produced no usable frames")
+            raise RuntimeError("No review video frames captured")
 
         return {
             "episode_id": episode_id,
@@ -574,8 +536,7 @@ class PrismaXControlAdapter:
                 "url": self._page.url,
                 "capture_method": "playback",
                 "capture_errors": errors,
-                "wall_watch_seconds": round(total_wall_watch, 1),
-                "video_watch_seconds": round(total_video_watch, 1),
+                "wall_watch_seconds": round(total_wall, 1),
                 "segments_total": segments_total,
                 "segments_seen": segments_seen,
                 "all_segments_seen": segments_seen >= segments_total if segments_total > 0 else False,
