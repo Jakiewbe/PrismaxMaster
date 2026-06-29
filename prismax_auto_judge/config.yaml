@@ -192,9 +192,9 @@ rules:
     suspicious: 0.55
 
 decision_thresholds:
-  auto_pass_min_probability: 0.90
-  auto_fail_max_probability: 0.10
-  min_confidence_submit: 0.90
+  auto_pass_min_probability: 0.85
+  auto_fail_max_probability: 0.15
+  min_confidence_submit: 0.85
 
 safety:
   require_episode_id_match_before_submit: true

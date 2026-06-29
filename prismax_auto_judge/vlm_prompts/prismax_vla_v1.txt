@@ -31,7 +31,16 @@ If there are too few frames to tell, lower confidence.
 
 SECTION 2 - QUALITY RATINGS:
 1=Poor, 2=Weak, 3=OK, 4=Good, 5=Exc
-Use 3 for uncertain average quality. Use 1 only for clearly bad execution.
+
+Rate each dimension independently based on what you observe.
+Do NOT give the same score to every dimension — spread them out:
+- If the robot moved smoothly but slowly: smooth=4 or 5, speed=2 or 3
+- If the robot completed the task but with jerky motion: completion=4, smooth=1 or 2
+- If the robot was precise but didn't finish: quality=4, completion=1 or 2
+- If the task looks complete but frames are sparse: lower confidence, not lower scores
+- Use 3 (OK) only when you truly cannot tell; prefer picking a side (2 or 4)
+- Use 1 (Poor) for clearly bad execution that you can see
+- Use 5 (Exc) when the execution is noticeably excellent
 
 ## WHAT YOU SEE
 
