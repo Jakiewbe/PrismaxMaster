@@ -202,8 +202,11 @@ def print_capture_summary(episode: dict[str, Any]) -> None:
         print(f"  black_or_not_ready_errors={len(black_errors)}")
 
 
-def _set_vla_state(vla_active: bool, state_path: str = "../prismax_state.json") -> None:
-    """Write vlaActive flag so the extension can pause/resume control loop."""
+def _set_vla_state(vla_active: bool, state_path: str = "../prismax_state.json") -> bool:
+    """Write vlaActive flag so the extension can pause/resume control loop.
+    Returns True if handshake succeeded (extension acknowledged by writing
+    controlPausedForVla back), or if state file doesn't exist yet (first run).
+    """
     import json
     path = Path(__file__).resolve().parent / state_path
     state: dict[str, Any] = {}
@@ -214,8 +217,25 @@ def _set_vla_state(vla_active: bool, state_path: str = "../prismax_state.json") 
             pass
     state["vlaActive"] = vla_active
     state["vlaStateUpdatedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    if not vla_active:
+        state.pop("controlPausedForVla", None)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # Handshake: wait for extension to ack (max 5s)
+    if vla_active:
+        import time as _time
+        deadline = _time.monotonic() + 5.0
+        while _time.monotonic() < deadline:
+            try:
+                current = json.loads(path.read_text(encoding="utf-8"))
+                if current.get("controlPausedForVla"):
+                    return True
+            except (OSError, json.JSONDecodeError):
+                pass
+            _time.sleep(0.3)
+        return False  # extension didn't ack in time
+    return True
 
 
 def run_live_once(

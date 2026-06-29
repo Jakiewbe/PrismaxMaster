@@ -332,20 +332,21 @@ class PrismaXControlAdapter:
         pb_cfg = capture_cfg.get("playback", {})
         min_watch = float(pb_cfg.get("min_watch_seconds", 30))
         capture_interval = float(pb_cfg.get("capture_interval_seconds", 4))
-        speed = float(pb_cfg.get("speed_multiplier", 10))
+        speed = float(pb_cfg.get("speed_multiplier", 1))
         max_segments = int(pb_cfg.get("max_segments", 20))
 
-        # Detect segment count from page (progress text like "1 of 14")
+        # Detect segment count from page
         body = self._page.locator("body").inner_text()
-        segments_total = self._detect_segment_count(body)
+        segments_total = self._detect_segment_count(body, page=self._page)
 
         frame_paths: dict[str, list[str]] = {}
         video_sources: dict[str, str] = {}
         errors: list[str] = []
-        total_watch_seconds = 0.0
+        total_video_watch = 0.0
+        total_wall_watch = 0.0
         segments_seen = 0
 
-        for seg_idx in range(max_segments):
+        for seg_idx in range(min(segments_total, max_segments)):
             if seg_idx > 0:
                 # Navigate to next segment
                 navs = self._page.locator("[class*='DataQAReview_navBtn']")
@@ -440,20 +441,18 @@ class PrismaXControlAdapter:
                     except Exception as exc:
                         errors.append(f"{view}:seg{seg_idx+1}:t{timestamp}:{type(exc).__name__}")
 
-                sleep_time = capture_interval / speed
-                time.sleep(max(0.05, sleep_time))
+                # Real-time sleep: speed=1 means watch time = wall time
+                time.sleep(max(0.05, capture_interval))
                 seg_watch += capture_interval
 
-            elapsed = time.monotonic() - seg_start
-            total_watch_seconds += seg_watch
+            wall_elapsed = time.monotonic() - seg_start
+            total_video_watch += seg_watch
+            total_wall_watch += wall_elapsed
             segments_seen += 1
 
-            # Merge segment frames
             for view, paths in seg_frames.items():
                 frame_paths.setdefault(view, []).extend(paths)
-
-            if seg_watch >= min_watch:
-                break  # watched enough
+            # Do NOT break — watch ALL segments
 
         if not any(frame_paths.values()):
             raise RuntimeError("No review video frames captured; playback produced no usable frames")
@@ -469,7 +468,8 @@ class PrismaXControlAdapter:
                 "url": self._page.url,
                 "capture_method": "playback",
                 "capture_errors": errors,
-                "watch_seconds": round(total_watch_seconds, 1),
+                "wall_watch_seconds": round(total_wall_watch, 1),
+                "video_watch_seconds": round(total_video_watch, 1),
                 "segments_total": segments_total,
                 "segments_seen": segments_seen,
                 "all_segments_seen": segments_seen >= segments_total if segments_total > 0 else False,
@@ -477,10 +477,27 @@ class PrismaXControlAdapter:
         }
 
     @staticmethod
-    def _detect_segment_count(body: str) -> int:
+    def _detect_segment_count(body: str, page=None) -> int:
         import re
-        m = re.search(r"(\d+)\s+of\s+(\d+)", body)
-        return int(m.group(2)) if m else 1
+        # Try multiple patterns
+        for pattern in [r"(\d+)\s+of\s+(\d+)", r"(\d+)\s*/\s*(\d+)",
+                        r"Episode\s+\d+\s+of\s+(\d+)", r"(\d+)/(\d+)"]:
+            m = re.search(pattern, body, re.IGNORECASE)
+            if m:
+                total = int(m.group(2))
+                if total > 0:
+                    return total
+        # Fallback: count video elements (each segment has 3 views, so /3)
+        if page is not None:
+            try:
+                vcount = page.evaluate(
+                    "() => document.querySelectorAll('video[src]').length"
+                )
+                if vcount > 3:
+                    return max(1, vcount // 3)
+            except Exception:
+                pass
+        return 1
 
     # ── legacy seek mode ───────────────────────────────────────
 
