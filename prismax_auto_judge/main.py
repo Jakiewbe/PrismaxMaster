@@ -202,6 +202,22 @@ def print_capture_summary(episode: dict[str, Any]) -> None:
         print(f"  black_or_not_ready_errors={len(black_errors)}")
 
 
+def _set_vla_state(vla_active: bool, state_path: str = "../prismax_state.json") -> None:
+    """Write vlaActive flag so the extension can pause/resume control loop."""
+    import json
+    path = Path(__file__).resolve().parent / state_path
+    state: dict[str, Any] = {}
+    if path.exists():
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pass
+    state["vlaActive"] = vla_active
+    state["vlaStateUpdatedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def run_live_once(
     config: dict[str, Any],
     config_hash: str,
@@ -224,6 +240,7 @@ def run_live_once(
     scorer = PrismaXScorer(config, config_hash)
     auto_submit_count = 0
     try:
+        _set_vla_state(True)
         adapter.open_page()
         if step == "return-arm":
             ok = adapter.return_to_arm_queue()
@@ -259,6 +276,7 @@ def run_live_once(
             return 0 if ok else 3
         return 0
     finally:
+        _set_vla_state(False)
         adapter.close()
 
 

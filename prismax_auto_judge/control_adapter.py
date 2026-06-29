@@ -293,7 +293,12 @@ class PrismaXControlAdapter:
 
 
     def capture_current_episode_frames(self) -> dict[str, Any]:
-        """Capture key frames from visible review-page videos into local image files."""
+        """Capture frames from review-page videos.
+
+        If playback.enabled in live_capture config: plays each video segment
+        for >= min_watch_seconds, capturing frames every capture_interval_seconds.
+        Otherwise falls back to seek-to-percentage mode.
+        """
         import re as _re
         import time
 
@@ -304,13 +309,189 @@ class PrismaXControlAdapter:
         episode_id = str(episode.get("episode_id") or "unknown")
         safe_episode_id = _re.sub(r"[^A-Za-z0-9_.-]+", "_", episode_id)
         capture_cfg = self.config.get("live_capture", {})
-        points = capture_cfg.get("percent_points", [0, 10, 25, 50, 75, 90, 100])
         view_names = capture_cfg.get("view_names", ["main", "left_wrist", "right_wrist"])
         frame_root = self._resolve_package_path(capture_cfg.get("frame_dir", "data/frames/live")) / safe_episode_id
         frame_root.mkdir(parents=True, exist_ok=True)
 
         body = self._page.locator("body").inner_text()
         task_prompt = self._extract_task_prompt(body)
+
+        if capture_cfg.get("playback", {}).get("enabled", True):
+            return self._capture_with_playback(episode_id, safe_episode_id, task_prompt, frame_root, view_names, capture_cfg)
+        return self._capture_with_seek(episode_id, safe_episode_id, task_prompt, frame_root, view_names, capture_cfg)
+
+    # ── playback mode ──────────────────────────────────────────
+
+    def _capture_with_playback(
+        self, episode_id: str, safe_id: str, task_prompt: str,
+        frame_root, view_names: list[str], capture_cfg: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Real playback: play each video segment, capture frames during playback."""
+        import time
+
+        pb_cfg = capture_cfg.get("playback", {})
+        min_watch = float(pb_cfg.get("min_watch_seconds", 30))
+        capture_interval = float(pb_cfg.get("capture_interval_seconds", 4))
+        speed = float(pb_cfg.get("speed_multiplier", 10))
+        max_segments = int(pb_cfg.get("max_segments", 20))
+
+        # Detect segment count from page (progress text like "1 of 14")
+        body = self._page.locator("body").inner_text()
+        segments_total = self._detect_segment_count(body)
+
+        frame_paths: dict[str, list[str]] = {}
+        video_sources: dict[str, str] = {}
+        errors: list[str] = []
+        total_watch_seconds = 0.0
+        segments_seen = 0
+
+        for seg_idx in range(max_segments):
+            if seg_idx > 0:
+                # Navigate to next segment
+                navs = self._page.locator("[class*='DataQAReview_navBtn']")
+                if navs.count() >= 2:
+                    try:
+                        navs.nth(1).click()
+                        time.sleep(2)
+                    except Exception:
+                        break
+                else:
+                    break
+
+            # Ensure videos play
+            self._page.evaluate("""() => {
+                document.querySelectorAll('video').forEach(v => {
+                    v.muted = true; v.currentTime = 0;
+                    v.play().catch(() => {});
+                });
+            }""")
+            time.sleep(1.5)
+
+            # Wait for at least one video ready
+            for _ in range(15):
+                ready = self._page.evaluate("""() => {
+                    for (const v of document.querySelectorAll('video'))
+                        if (v.readyState >= 2 && v.videoWidth > 0 && !v.paused) return true;
+                    return false;
+                }""")
+                if ready:
+                    break
+                time.sleep(0.5)
+
+            seg_start = time.monotonic()
+            seg_frames: dict[str, list[str]] = {}
+            seg_watch = 0.0
+
+            # Capture frames during playback
+            while seg_watch < min_watch:
+                # Check if video ended
+                all_ended = self._page.evaluate("""() => {
+                    const vs = document.querySelectorAll('video');
+                    if (vs.length === 0) return true;
+                    return Array.from(vs).every(v => v.ended || v.currentTime >= v.duration - 0.5);
+                }""")
+                if all_ended:
+                    break
+
+                # Check if videos froze (no progress in 5 seconds)
+                progress_made = self._page.evaluate("""() => {
+                    for (const v of document.querySelectorAll('video'))
+                        if (v.readyState >= 2 && !v.paused && !v.ended && v.currentTime > 0.1) return true;
+                    return false;
+                }""")
+                if not progress_made:
+                    # Try replay
+                    self._page.evaluate("""() => {
+                        document.querySelectorAll('video').forEach(v => {
+                            v.currentTime = 0; v.play().catch(() => {});
+                        });
+                    }""")
+                    time.sleep(1)
+                    seg_watch += 1  # count attempted time
+
+                # Screenshot each visible video
+                timestamp = int(seg_watch)
+                for vi, view in enumerate(view_names):
+                    try:
+                        els = self._page.locator("video")
+                        if vi >= els.count():
+                            break
+                        box = els.nth(vi).bounding_box()
+                        if not box or box["width"] < 10:
+                            continue
+                        out = frame_root / f"{view}_seg{seg_idx+1:02d}_t{timestamp:03d}s.jpg"
+                        self._page.screenshot(
+                            path=str(out),
+                            clip={"x": box["x"], "y": box["y"], "width": box["width"], "height": box["height"]},
+                            type="jpeg", quality=80, timeout=5000,
+                        )
+                        nonblack = self._image_nonblack_ratio(out)
+                        if nonblack < 0.15:
+                            try: out.unlink()
+                            except OSError: pass
+                            continue
+                        seg_frames.setdefault(view, []).append(str(out))
+                        if not video_sources.get(view):
+                            src = self._page.evaluate(f"""() => {{
+                                const v = document.querySelectorAll('video')[{vi}];
+                                return (v.src || '').substring(0, 200);
+                            }}""")
+                            video_sources[view] = str(src or "")
+                    except Exception as exc:
+                        errors.append(f"{view}:seg{seg_idx+1}:t{timestamp}:{type(exc).__name__}")
+
+                sleep_time = capture_interval / speed
+                time.sleep(max(0.05, sleep_time))
+                seg_watch += capture_interval
+
+            elapsed = time.monotonic() - seg_start
+            total_watch_seconds += seg_watch
+            segments_seen += 1
+
+            # Merge segment frames
+            for view, paths in seg_frames.items():
+                frame_paths.setdefault(view, []).extend(paths)
+
+            if seg_watch >= min_watch:
+                break  # watched enough
+
+        if not any(frame_paths.values()):
+            raise RuntimeError("No review video frames captured; playback produced no usable frames")
+
+        return {
+            "episode_id": episode_id,
+            "task_prompt": task_prompt,
+            "video_paths": {},
+            "frame_paths": frame_paths,
+            "video_sources": video_sources,
+            "metadata": {
+                "source": "prismax_live_page",
+                "url": self._page.url,
+                "capture_method": "playback",
+                "capture_errors": errors,
+                "watch_seconds": round(total_watch_seconds, 1),
+                "segments_total": segments_total,
+                "segments_seen": segments_seen,
+                "all_segments_seen": segments_seen >= segments_total if segments_total > 0 else False,
+            },
+        }
+
+    @staticmethod
+    def _detect_segment_count(body: str) -> int:
+        import re
+        m = re.search(r"(\d+)\s+of\s+(\d+)", body)
+        return int(m.group(2)) if m else 1
+
+    # ── legacy seek mode ───────────────────────────────────────
+
+    def _capture_with_seek(
+        self, episode_id: str, safe_id: str, task_prompt: str,
+        frame_root, view_names: list[str], capture_cfg: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Legacy: seek to percentage points and screenshot."""
+        import time
+
+        points = capture_cfg.get("percent_points", [0, 10, 25, 50, 75, 90, 100])
         wait_seconds = float(capture_cfg.get("wait_until_ready_seconds", 8))
         warmup_seconds = float(capture_cfg.get("warmup_play_seconds", 1.0))
         min_nonblack_ratio = float(capture_cfg.get("min_nonblack_ratio", 0.70))
@@ -339,23 +520,17 @@ class PrismaXControlAdapter:
                     out = frame_root / f"{view}_{int(pct):03d}.jpg"
                     self._page.screenshot(
                         path=str(out),
-                        clip={
-                            "x": max(0, float(clip.get("x", 0))),
-                            "y": max(0, float(clip.get("y", 0))),
-                            "width": max(1, float(clip.get("width", 1))),
-                            "height": max(1, float(clip.get("height", 1))),
-                        },
-                        type="jpeg",
-                        quality=88,
-                        timeout=5000,
+                        clip={"x": max(0, float(clip.get("x", 0))),
+                              "y": max(0, float(clip.get("y", 0))),
+                              "width": max(1, float(clip.get("width", 1))),
+                              "height": max(1, float(clip.get("height", 1)))},
+                        type="jpeg", quality=88, timeout=5000,
                     )
                     nonblack = self._image_nonblack_ratio(out)
                     if nonblack < min_nonblack_ratio:
                         errors.append(f"{view}:{pct}:black_or_not_ready:{nonblack:.2f}")
-                        try:
-                            out.unlink()
-                        except OSError:
-                            pass
+                        try: out.unlink()
+                        except OSError: pass
                         continue
                     frame_paths[view].append(str(out))
                 except Exception as exc:

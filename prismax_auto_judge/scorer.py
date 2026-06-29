@@ -38,7 +38,16 @@ class PrismaXScorer:
 
             frames = sample_episode_frames(episode, features, self.config)
 
-            if hard_fail_reasons:
+            # v3 conservative: only hard-fail on indisputable CV evidence.
+            # Borderline metrics (freeze/static that could be a still camera)
+            # are downgraded to suspicious and let VLM make the call.
+            definite_fails = [
+                r for r in hard_fail_reasons
+                if any(kw in r for kw in ["black_frame_ratio", "brightness_low", "video_error", "required_view_missing", "zero_length"])
+            ]
+            borderline_fails = [r for r in hard_fail_reasons if r not in definite_fails]
+
+            if definite_fails:
                 return self._result(
                     episode_id,
                     "FAIL",
@@ -53,6 +62,10 @@ class PrismaXScorer:
                     frames=frames,
                     scores=self.config["default_scores"]["hard_fail"],
                 )
+
+            # Borderline: downgrade to suspicious and let VLM judge
+            if borderline_fails:
+                suspicious_reasons = sorted(set(suspicious_reasons + borderline_fails))
 
             # Suspicious signals no longer short-circuit — they feed into VLM context.
             # The VLM sees both the frames AND the CV flags, so it can cross-check.

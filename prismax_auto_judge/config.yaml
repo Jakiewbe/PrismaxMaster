@@ -32,6 +32,12 @@ live_capture:
   warmup_play_seconds: 1.0
   min_nonblack_ratio: 0.70
   view_names: ["main", "left_wrist", "right_wrist"]
+  playback:
+    enabled: true            # real playback mode (not seek-to-percentage)
+    min_watch_seconds: 30    # play at least 30 seconds per segment
+    capture_interval_seconds: 4  # capture frame every 4 seconds of video
+    speed_multiplier: 10     # 10x playback speed
+    max_segments: 20         # max segments to process per episode
 
 playback:
   enabled: true
