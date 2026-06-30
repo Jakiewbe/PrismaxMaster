@@ -403,41 +403,31 @@ class PrismaXControlAdapter:
             raise RuntimeError("Page watch timer not satisfied before submit")
 
     def fill_result(self, result: dict[str, Any]) -> None:
-        """Fill the scoring form using form_plan."""
+        """Fill the scoring form using Playwright native clicks (not JS dispatchEvent).
+        React 18 requires real pointer events, not synthetic ones.
+        """
         plan = result.get("form_plan", {})
         if not plan.get("can_fill"):
             return
 
         import time
-        click_events = plan.get("click_events", ["mousedown", "mouseup", "click"])
 
-        # Helper JS to click a specific cell
-        def click_cell(table_index: int, row: int, col: int) -> str:
-            return self._page.evaluate("""
-                (args) => {
-                    const tables = document.querySelectorAll('table[class*="gridTable"]');
-                    if (tables.length <= args.t) return 'no-table';
-                    const rows = tables[args.t].querySelectorAll('tbody tr');
-                    if (args.r >= rows.length) return 'no-row';
-                    const cells = rows[args.r].querySelectorAll('td');
-                    if (args.c >= cells.length) return 'no-cell';
-                    const td = cells[args.c];
-                    const dot = td.querySelector('[class*="dot"]');
-                    if (dot) {
-                        const events = args.events;
-                        events.forEach(type => {
-                            dot.dispatchEvent(new MouseEvent(type, {bubbles: true}));
-                        });
-                        dot.click();
-                    }
-                    td.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-                    td.click();
-                    if (dot) {
-                        return 'ok dot=' + dot.className.substring(0, 50);
-                    }
-                    return 'ok no-dot';
-                }
-            """, {"t": table_index, "r": row, "c": col, "events": click_events})
+        def click_cell(table_index: int, row: int, col: int) -> None:
+            """Click a scoring table cell using Playwright's native click."""
+            tables = self._page.locator("table.DataQAReview_gridTable__AbOV0")
+            if tables.count() <= table_index:
+                raise RuntimeError(f"Table {table_index} not found")
+            table = tables.nth(table_index)
+            rows = table.locator("tbody tr")
+            if rows.count() <= row:
+                raise RuntimeError(f"Row {row} not found in table {table_index}")
+            cells = rows.nth(row).locator("td")
+            if cells.count() <= col:
+                raise RuntimeError(f"Col {col} not found in row {row}")
+            target = cells.nth(col)
+            # Playwright native click — triggers React properly
+            target.click(force=True, timeout=3000)
+            time.sleep(0.15)
 
         # Fill PASS/FAIL (table 0)
         pf_checks = plan.get("pass_fail_checks", {})
@@ -452,7 +442,6 @@ class PrismaXControlAdapter:
             else:
                 continue
             click_cell(0, row_idx, col)
-            time.sleep(0.25)
 
         # Fill QUALITY (table 1)
         q_sliders = plan.get("quality_sliders", {})
@@ -462,7 +451,6 @@ class PrismaXControlAdapter:
             value = slider.get("value", 3)
             col = max(1, min(5, int(value)))  # 1=Poor ... 5=Exc
             click_cell(1, row_idx, col)
-            time.sleep(0.25)
 
     def submit(self) -> None:
         """Click Submit & earn points button."""
@@ -541,21 +529,15 @@ class PrismaXControlAdapter:
         total_wall_watch = 0.0
         segments_seen = 0
 
-        for seg_idx in range(min(segments_total, max_segments)):
-            if seg_idx > 0:
-                # Navigate to next segment
-                navs = self._page.locator("[class*='DataQAReview_navBtn']")
-                if navs.count() >= 2:
-                    try:
-                        navs.nth(1).click()
-                        time.sleep(2)
-                    except Exception:
-                        break
-                else:
-                    break
-
-            # Ensure videos play through normal page interactions.
-            self._start_page_video_playback()
+        for seg_idx in range(1):  # single segment per call — caller loops
+            # Click play overlay + start videos
+            self._page.evaluate("""() => {
+                const o = document.querySelector('[class*="playOverlay"]');
+                if (o) o.click();
+                document.querySelectorAll('video').forEach(v => {
+                    v.muted = true; v.play().catch(() => {});
+                });
+            }""")
             time.sleep(1.5)
 
             # Wait for at least one video ready

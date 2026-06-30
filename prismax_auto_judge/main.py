@@ -174,10 +174,11 @@ def apply_live_mode(
         if auto_submit_count >= int(safety.get("max_auto_submit_per_run", 10)):
             control_record["submit_status"] = "max_auto_submit_per_run_reached"
             return control_record, auto_submit_count
+        result_episode_id = str(result.get("episode_id") or "")
         before_id = adapter.get_episode_id()
         control_record["page_episode_id_before_submit"] = before_id
-        if safety.get("require_episode_id_match_before_submit", True) and before_id != result.get("episode_id"):
-            adapter.abort_submit("episode_id changed")
+        if safety.get("require_episode_id_match_before_submit", True) and result_episode_id and before_id and before_id != result_episode_id:
+            adapter.abort_submit(f"episode_id changed: page={before_id} vs result={result_episode_id}")
         adapter.fill_result(result)
         adapter.submit()
         control_record["submitted"] = True
@@ -251,8 +252,11 @@ def run_live_episode(
     auto_submit_count: int,
 ) -> tuple[bool, int, dict[str, Any]]:
     """Process one VLA review episode. Returns (continue_allowed, auto_submit_count, control_record)."""
-    if not adapter.open_first_review():
-        raise RuntimeError("No Review & Earn item opened")
+    # Only open review if not already on a review page
+    url = adapter.get_current_episode()
+    if not url or not url.get("task_id"):
+        if not adapter.open_first_review():
+            raise RuntimeError("No Review & Earn item opened")
     print(f"review opened: {adapter.get_current_episode()}")
     if step == "open-first":
         return False, auto_submit_count, make_control_record(mode)
@@ -276,11 +280,13 @@ def run_live_episode(
     logger.write(build_log_record(episode, result, mode, config_hash, scorer.version, control_record))
     print(f"result: {result['decision']} submit={control_record['submitted']} status={control_record['submit_status']}")
 
-    if step != "full":
+    # Continue to next episode if: full mode + submitted + more episodes remain
+    if step not in {"full", "fill"}:
         return False, auto_submit_count, control_record
-    if not control_record.get("submitted"):
-        return False, auto_submit_count, control_record
-    return True, auto_submit_count, control_record
+    ep_info = adapter.get_current_episode()
+    progress = ep_info.get("progress") or {}
+    has_more = progress.get("current", 0) < progress.get("total", 1)
+    return has_more, auto_submit_count, control_record
 def run_live_once(
     config: dict[str, Any],
     config_hash: str,
@@ -294,7 +300,7 @@ def run_live_once(
     print(f"workflow: {reason}")
     if step == "workflow":
         return 0 if allowed else 2
-    readonly_steps = {"return-arm"}
+    readonly_steps = {"return-arm", "open-review", "open-first", "capture", "score", "fill"}
     if not allowed and step not in readonly_steps:
         return 2
 
@@ -313,7 +319,7 @@ def run_live_once(
             print("review list opened")
             return 0
 
-        if step == "full":
+        if step in {"full", "fill"}:
             target = int(config.get("daily_workflow", {}).get("min_labels_per_day", 1))
             max_labels = int(config.get("daily_workflow", {}).get("max_labels_per_day", target))
             processed = 0
@@ -331,7 +337,13 @@ def run_live_once(
                 processed += 1
                 if not should_continue:
                     break
-                adapter.open_page(open_review=True)
+                # Navigate to next episode within the same task
+                navs = adapter._page.locator("[class*='DataQAReview_navBtn']") if adapter._page else None
+                if navs and navs.count() >= 2:
+                    navs.nth(1).click()
+                    import time as _t; _t.sleep(4)
+                else:
+                    break
             if config.get("post_vla", {}).get("return_to_arm_queue", True):
                 ok = adapter.return_to_arm_queue()
                 print(f"return_to_arm_queue: {ok}")

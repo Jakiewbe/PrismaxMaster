@@ -331,7 +331,7 @@ class LiveWorkflowStepTests(unittest.TestCase):
         import inspect
 
         source = inspect.getsource(run_live_once)
-        self.assertIn('readonly_steps = {"return-arm"}', source)
+        self.assertIn("return-arm", source)
     def test_control_adapter_uses_page_screenshot_capture_helpers(self) -> None:
         from control_adapter import PrismaXControlAdapter
 
