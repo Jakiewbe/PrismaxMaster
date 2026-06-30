@@ -174,12 +174,18 @@ var PX = PX || {};
             ...configuredEnter,
             'Enter Live Control',
             'Join Queue',
-            'Begin Validating',
-            'Start Validating',
+            'Enter Pool',
             'Control Now'
         ]));
         return findClickableByKeywords(keywords, {
-            blacklist: ['Connect Wallet', 'MetaMask', 'Phantom', 'OKX'],
+            blacklist: ['Connect Wallet', 'MetaMask', 'Phantom', 'OKX', 'Begin Validating', 'Start Validating'],
+            excludeLeave: true
+        });
+    }
+
+    function findVlaEntryButton() {
+        return findClickableByKeywords(['Begin Validating', 'Start Validating'], {
+            blacklist: ['Enter Live Control', 'Join Queue', 'Enter Pool', 'Control Now', 'Connect Wallet', 'MetaMask', 'Phantom', 'OKX'],
             excludeLeave: true
         });
     }
@@ -221,9 +227,11 @@ var PX = PX || {};
         isDataReviewListPage: isDataReviewListPage,
         findReviewEarnButton: findReviewEarnButton,
         findValidationEntryButton: findValidationEntryButton,
+        findVlaEntryButton: findVlaEntryButton,
         PAGE_MODES: PAGE_MODES,
         detectPageMode: detectPageMode,
         ActionLock: ActionLock,
         parseQueueRank: parseQueueRank
     };
 })();
+

@@ -210,8 +210,9 @@ class DailyWorkflowPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             state_path = Path(tmp) / "state.json"
             state_path.write_text('{"totalOperations": 5}', encoding="utf-8")
-            self.config["daily_workflow"]["control_state_file"] = "state.json"
-            policy = DailyWorkflowPolicy(self.config, tmp)
+            config, _ = load_config(ROOT / "config.yaml")
+            config["daily_workflow"]["control_state_file"] = "state.json"
+            policy = DailyWorkflowPolicy(config, tmp)
             allowed, reason = policy.is_control_ready()
             self.assertFalse(allowed)
             self.assertIn("5/6", reason)
@@ -225,6 +226,60 @@ class DailyWorkflowPolicyTests(unittest.TestCase):
 
 
 class MainModeTests(unittest.TestCase):
+    def test_daily_workflow_allows_gold_rank_over_threshold(self) -> None:
+        from workflow_policy import DailyWorkflowPolicy
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            state_path = tmp / "state.json"
+            state_path.write_text('{"totalOperations": 0, "rank": 101, "currentArm": "Training Arm Gold"}', encoding="utf-8")
+            config, _ = load_config(ROOT / "config.yaml")
+            config["daily_workflow"]["control_state_file"] = "state.json"
+            config["daily_workflow"]["allow_vla_when_gold_rank_gt"] = 100
+            policy = DailyWorkflowPolicy(config, tmp)
+            allowed, reason = policy.is_control_ready()
+            self.assertTrue(allowed)
+            self.assertIn("control_ready_by_gold_rank", reason)
+
+    def test_daily_workflow_does_not_use_generic_rank_for_arena(self) -> None:
+        from workflow_policy import DailyWorkflowPolicy
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            state_path = tmp / "state.json"
+            state_path.write_text('{"totalOperations": 0, "rank": 101, "currentArm": "Arena Arm"}', encoding="utf-8")
+            config, _ = load_config(ROOT / "config.yaml")
+            config["daily_workflow"]["control_state_file"] = "state.json"
+            config["daily_workflow"]["allow_vla_when_gold_rank_gt"] = 100
+            policy = DailyWorkflowPolicy(config, tmp)
+            allowed, reason = policy.is_control_ready()
+            self.assertFalse(allowed)
+            self.assertIn("rank=None", reason)
+
+    def test_daily_workflow_uses_explicit_gold_rank_without_current_arm(self) -> None:
+        from workflow_policy import DailyWorkflowPolicy
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            state_path = tmp / "state.json"
+            state_path.write_text('{"totalOperations": 0, "goldRank": 101}', encoding="utf-8")
+            config, _ = load_config(ROOT / "config.yaml")
+            config["daily_workflow"]["control_state_file"] = "state.json"
+            config["daily_workflow"]["allow_vla_when_gold_rank_gt"] = 100
+            policy = DailyWorkflowPolicy(config, tmp)
+            allowed, reason = policy.is_control_ready()
+            self.assertTrue(allowed)
+            self.assertIn("control_ready_by_gold_rank", reason)
+    def test_daily_workflow_blocks_gold_rank_at_threshold(self) -> None:
+        from workflow_policy import DailyWorkflowPolicy
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            state_path = tmp / "state.json"
+            state_path.write_text('{"totalOperations": 0, "rank": 100, "currentArm": "Training Arm Gold"}', encoding="utf-8")
+            config, _ = load_config(ROOT / "config.yaml")
+            config["daily_workflow"]["control_state_file"] = "state.json"
+            config["daily_workflow"]["allow_vla_when_gold_rank_gt"] = 100
+            policy = DailyWorkflowPolicy(config, tmp)
+            allowed, reason = policy.is_control_ready()
+            self.assertFalse(allowed)
+            self.assertIn("need_rank_gt", reason)
     def test_auto_limited_mode_is_supported(self) -> None:
         from main import VALID_MODES
 
@@ -271,16 +326,17 @@ class ConservativeVlaConfigTests(unittest.TestCase):
 
 
 class LiveWorkflowStepTests(unittest.TestCase):
-    def test_readonly_live_steps_are_documented_for_workflow_bypass(self) -> None:
+    def test_only_return_arm_bypasses_workflow_gate(self) -> None:
         from main import run_live_once
+        import inspect
 
-        source_names = run_live_once.__code__.co_consts
-        self.assertIn("open-review", str(source_names))
-        self.assertIn("capture", str(source_names))
-        self.assertIn("return-arm", str(source_names))
-
+        source = inspect.getsource(run_live_once)
+        self.assertIn('readonly_steps = {"return-arm"}', source)
     def test_control_adapter_uses_page_screenshot_capture_helpers(self) -> None:
         from control_adapter import PrismaXControlAdapter
 
         self.assertTrue(hasattr(PrismaXControlAdapter, "_seek_video_and_get_clip"))
         self.assertTrue(hasattr(PrismaXControlAdapter, "_image_nonblack_ratio"))
+
+
+

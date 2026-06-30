@@ -60,9 +60,55 @@ class DailyWorkflowPolicy:
 
         min_ops = int(self.workflow.get("min_control_operations_before_vla", 1))
         total_ops = int(state.get("totalOperations", state.get("count", 0)) or 0)
-        if total_ops < min_ops:
-            return False, f"control_operations_below_threshold:{total_ops}/{min_ops}"
-        return True, f"control_ready:{total_ops}/{min_ops}"
+        if total_ops >= min_ops:
+            return True, f"control_ready:{total_ops}/{min_ops}"
+
+        rank_threshold = self.workflow.get("allow_vla_when_gold_rank_gt")
+        rank = self._read_rank(state)
+        if rank_threshold is not None and rank is not None:
+            threshold = int(rank_threshold)
+            if rank > threshold:
+                return True, f"control_ready_by_gold_rank:{rank}>{threshold};ops={total_ops}/{min_ops}"
+
+        if rank_threshold is not None:
+            return False, f"control_operations_below_threshold:{total_ops}/{min_ops};rank={rank};need_rank_gt:{rank_threshold}"
+        return False, f"control_operations_below_threshold:{total_ops}/{min_ops}"
+
+    def _read_rank(self, state: dict[str, Any]) -> int | None:
+        for key in ("goldRank", "trainingGoldRank"):
+            value = state.get(key)
+            parsed = self._parse_int(value)
+            if parsed is not None:
+                return parsed
+
+        if not self._is_gold_arm_state(state):
+            return None
+
+        for key in ("rank", "lastRank"):
+            value = state.get(key)
+            parsed = self._parse_int(value)
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _is_gold_arm_state(self, state: dict[str, Any]) -> bool:
+        gold_label = str(self.workflow.get("gold_arm_label", "Training Arm Gold")).strip().lower()
+        for key in ("currentArm", "current_arm", "arm", "armLabel", "queuedArm", "activeArm"):
+            value = state.get(key)
+            if value is None:
+                continue
+            if str(value).strip().lower() == gold_label:
+                return True
+        return False
+
+    @staticmethod
+    def _parse_int(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     def _read_counts(self) -> dict[str, Any]:
         path = self._counts_path()
@@ -84,3 +130,5 @@ class DailyWorkflowPolicy:
         if path.is_absolute():
             return path
         return self.base_dir / path
+
+

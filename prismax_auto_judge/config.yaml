@@ -11,6 +11,8 @@ daily_workflow:
   enabled: true
   control_first: true
   min_control_operations_before_vla: 6
+  allow_vla_when_gold_rank_gt: 100
+  gold_arm_label: "Training Arm Gold"
   min_labels_per_day: 2
   max_labels_per_day: 4
   daily_counts_path: "data/logs/vla_daily_counts.json"
@@ -220,6 +222,7 @@ default_scores:
     smoothness: 3
     quality: 3
     completion: 3
+
 
 
 

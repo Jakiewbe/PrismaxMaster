@@ -583,7 +583,7 @@
         function detectPageState() {
             const endBtn = findButton(['End Tele-Operation', 'End Session', 'End Control', 'Stop Validating']);
             const queueBtn = findButton(['Leave', 'Leave Queue', 'Waiting', 'Position', 'Queued', 'In Queue']);
-            const enterBtn = findButton(['Enter Live Control', 'Join Queue', 'Enter Pool', 'Begin Validating', 'Start Validating', 'Control Now']);
+            const enterBtn = findButton(['Enter Live Control', 'Join Queue', 'Enter Pool', 'Control Now']);
 
             const oldState = {
                 isOperating: state.isOperating,
@@ -1268,7 +1268,7 @@
         },
 
         text: {
-            enter: ["Enter Live Control", "Join Queue", "Enter Pool", "Begin Validating", "Start Validating", "Control Now"],
+            enter: ["Enter Live Control", "Join Queue", "Enter Pool", "Control Now"],
             end: ["End Tele-Operation", "End Session", "End Control", "Stop Validating"],
             queuing: ["Leave", "Leave Queue", "Waiting", "Position", "Queued", "In Queue"],
             liveChat: ["Live Chat", "Open Live Chat"],
@@ -3211,3 +3211,4 @@
 
     setTimeout(loop, 3000);
 })();
+

@@ -21,10 +21,11 @@ class PrismaXControlAdapter:
         self._browser = None
         self._playwright = None
         self._context = None
+        self._last_playback_start: dict[str, Any] = {}
 
     # ── lifecycle ──────────────────────────────────────────────
 
-    def open_page(self) -> None:
+    def open_page(self, open_review: bool = False) -> None:
         """Connect to Chrome via CDP and navigate to PrismaX dashboard."""
         from playwright.sync_api import sync_playwright  # type: ignore
         import time
@@ -52,7 +53,8 @@ class PrismaXControlAdapter:
         if not any(marker in body for marker in logged_in_markers):
             raise RuntimeError("Not logged in to PrismaX - please log in first")
 
-        self._open_review_list()
+        if open_review:
+            self._open_review_list()
 
     def close(self) -> None:
         """Disconnect from browser (does not close Chrome)."""
@@ -87,7 +89,7 @@ class PrismaXControlAdapter:
     # ── navigation ─────────────────────────────────────────────
 
     def _open_review_list(self) -> None:
-        """Open the current Data Review list — tries direct URL first, then UI path."""
+        """Open the current Data Review list from dashboard/banner/carousel UI."""
         import time
 
         if not self._page:
@@ -100,18 +102,6 @@ class PrismaXControlAdapter:
         if is_review_list_url(self._page.url):
             return
 
-        # v2: try direct URL first (bypasses Connect modal issues)
-        self._page.goto(review_list_url, timeout=20000, wait_until="domcontentloaded")
-        time.sleep(4)
-        # Dismiss any overlay
-        self._page.evaluate("""() => {
-            document.querySelectorAll('[class*="overlay"], [class*="Overlay"], [class*="modal"], [class*="Modal"]').forEach(e => e.remove());
-        }""")
-        time.sleep(1)
-        if self._page.locator("button:has-text('Review & Earn')").count() > 0:
-            return
-
-        # Fallback: legacy UI flow
         selectors = self.config.get("browser", {}).get("selectors", {})
         candidate_selectors = selectors.get("validation_entry_buttons") or [
             "button:has-text('Begin Validating')",
@@ -227,43 +217,196 @@ class PrismaXControlAdapter:
 
     # ── form filling ───────────────────────────────────────────
 
-    def _wait_for_page_watch_timer(self, min_seconds: int = 35) -> None:
-        """ALWAYS play videos for >= min_seconds before filling.
-        PrismaX React timer requires real playback on the CURRENT segment.
-        We don't trust the DOM timer text — React may have reset internally.
-        """
+    def _read_page_watch_timer(self) -> tuple[int, int] | None:
+        """Return watched and required seconds from the page timer text."""
+        import re
+
+        body = self._page.locator("body").inner_text()
+        match = re.search(r"(\d+):(\d{2})\s*/\s*(\d+):(\d{2})", body)
+        if not match:
+            return None
+        watched = int(match.group(1)) * 60 + int(match.group(2))
+        required = int(match.group(3)) * 60 + int(match.group(4))
+        return watched, required
+
+    def _video_playback_state(self) -> dict[str, Any]:
+        return self._page.evaluate(
+            """() => {
+                const videos = Array.from(document.querySelectorAll('video'));
+                const items = videos.map((v, idx) => ({
+                    index: idx,
+                    currentTime: Number(v.currentTime || 0),
+                    duration: Number(v.duration || 0),
+                    paused: Boolean(v.paused),
+                    ended: Boolean(v.ended),
+                    readyState: Number(v.readyState || 0),
+                    width: Number(v.videoWidth || 0),
+                    height: Number(v.videoHeight || 0),
+                }));
+                return {
+                    count: items.length,
+                    playingCount: items.filter(v => !v.paused && !v.ended).length,
+                    maxCurrentTime: items.reduce((m, v) => Math.max(m, v.currentTime), 0),
+                    items,
+                };
+            }"""
+        )
+
+    def _timer_value_or_zero(self) -> int:
+        timer = self._read_page_watch_timer()
+        return int(timer[0]) if timer else 0
+
+    def _playback_started(self, before: dict[str, Any], before_timer: int) -> bool:
+        after = self._video_playback_state()
+        after_timer = self._timer_value_or_zero()
+        before_time = float(before.get("maxCurrentTime") or 0.0)
+        after_time = float(after.get("maxCurrentTime") or 0.0)
+        return (
+            after_time > before_time + 0.25
+            or int(after.get("playingCount") or 0) > 0
+            or after_timer > before_timer
+        )
+
+    def _start_page_video_playback(self) -> None:
+        """Start playback through real page clicks, not video.play()."""
         import time
-        print(f"  Ensuring {min_seconds}s watch time before fill...")
-        for i in range(min_seconds):
-            self._page.evaluate("""() => {
-                const o = document.querySelector('[class*="playOverlay"]');
-                if (o) o.click();
-                document.querySelectorAll('video').forEach(v => {
-                    v.muted = true;
-                    if (v.paused) v.play().catch(() => {});
-                });
-            }""")
+
+        self._last_playback_start = {"ok": False, "method": None, "error": None}
+        before = self._video_playback_state()
+        before_timer = self._timer_value_or_zero()
+        selectors = self.config.get("browser", {}).get("selectors", {})
+        candidates = [
+            selectors.get("scenario_trigger", ""),
+            "button:has-text('Play')",
+            "[role='button']:has-text('Play')",
+            "[aria-label*='Play']",
+            "[aria-label*='play']",
+            "[title*='Play']",
+            "[title*='play']",
+            "[class*='DataQAReview_scenarioTrigger']",
+        ]
+
+        for selector in candidates:
+            if not selector:
+                continue
+            locator = self._page.locator(selector)
+            count = min(locator.count(), 5)
+            for idx in range(count):
+                try:
+                    item = locator.nth(idx)
+                    if not item.is_visible():
+                        continue
+                    item.scroll_into_view_if_needed(timeout=1000)
+                    item.click(timeout=1500, force=True)
+                    time.sleep(1.2)
+                    if self._playback_started(before, before_timer):
+                        self._last_playback_start = {"ok": True, "method": "selector", "selector": selector, "index": idx}
+                        return
+                except Exception as exc:
+                    self._last_playback_start = {"ok": False, "method": "selector", "selector": selector, "index": idx, "error": type(exc).__name__}
+                    continue
+
+        boxes = self._page.evaluate(
+            """() => {
+                const visible = (el) => {
+                    const style = getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden' &&
+                        rect.width > 20 && rect.height > 20;
+                };
+                const nodes = Array.from(document.querySelectorAll(
+                    '[class*="scenarioTrigger"], [class*="ScenarioTrigger"], [aria-label*="play" i], [title*="play" i], button, video, canvas, [class*="video" i], [class*="player" i]'
+                )).filter(visible);
+                return nodes.map((el, index) => {
+                    const rect = el.getBoundingClientRect();
+                    const text = String(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || el.className || el.tagName || '').replace(/\s+/g, ' ').slice(0, 120);
+                    return {index, text, tag: el.tagName, x: rect.left + window.scrollX, y: rect.top + window.scrollY, width: rect.width, height: rect.height};
+                }).sort((a, b) => (b.width * b.height) - (a.width * a.height)).slice(0, 12);
+            }"""
+        )
+        for box in boxes:
+            try:
+                self._page.mouse.click(
+                    float(box["x"]) + float(box["width"]) / 2,
+                    float(box["y"]) + float(box["height"]) / 2,
+                )
+                time.sleep(1.2)
+                if self._playback_started(before, before_timer):
+                    self._last_playback_start = {"ok": True, "method": "mouse", "box": box}
+                    return
+            except Exception as exc:
+                self._last_playback_start = {"ok": False, "method": "mouse", "box": box, "error": type(exc).__name__}
+                continue
+
+        after = self._video_playback_state()
+        self._last_playback_start = {
+            "ok": False,
+            "method": "none",
+            "before": before,
+            "after": after,
+            "timer_before": before_timer,
+            "timer_after": self._timer_value_or_zero(),
+        }
+        raise RuntimeError("Could not start PrismaX video playback through real page controls")
+
+    def _wait_for_page_watch_timer(self, min_seconds: int = 32) -> None:
+        """Wait for PrismaX's own 30s watch timer to complete."""
+        import time
+
+        body = self._page.locator("body").inner_text()
+        timer = self._read_page_watch_timer()
+        if "Keep watching" not in body and timer is None:
+            return
+        if timer and timer[0] >= timer[1] > 0:
+            return
+
+        print("  Waiting for page watch timer...")
+        self._start_page_video_playback()
+
+        deadline = time.monotonic() + max(min_seconds + 20, 50)
+        last_watched = timer[0] if timer else 0
+        stuck_ticks = 0
+        while time.monotonic() < deadline:
             time.sleep(1)
-            # Kill any warning that pops up during wait
-            self._page.evaluate("""() => {
-                document.querySelectorAll('*').forEach(el => {
-                    const text = (el.textContent || '').trim();
-                    if ((text.includes('Keep watching') || text.includes('Press play')) && text.length < 120) {
-                        const overlay = el.closest('[class*="overlay"], [class*="Overlay"], [class*="modal"], [class*="Modal"]') || el;
-                        overlay.remove();
-                    }
-                });
-            }""")
-        print(f"  Timer wait done ({min_seconds}s)")
+            body = self._page.locator("body").inner_text()
+            timer = self._read_page_watch_timer()
+            if timer:
+                watched, required = timer
+                if watched >= required > 0:
+                    print(f"  Timer satisfied at {watched}s/{required}s")
+                    return
+                if watched > last_watched:
+                    last_watched = watched
+                    stuck_ticks = 0
+                else:
+                    stuck_ticks += 1
+                    if stuck_ticks in {5, 12, 20}:
+                        self._start_page_video_playback()
+            elif "Keep watching" not in body:
+                print("  Timer satisfied")
+                return
+
+        timer = self._read_page_watch_timer()
+        detail = f" {timer[0]}s/{timer[1]}s" if timer else " unknown timer"
+        raise RuntimeError("Page watch timer was not satisfied after real-time waiting:" + detail)
+
+    def _assert_page_watch_timer_satisfied(self) -> None:
+        """Verify the page watch timer was already satisfied during review."""
+        body = self._page.locator("body").inner_text()
+        timer = self._read_page_watch_timer()
+        if timer:
+            watched, required = timer
+            if watched >= required > 0:
+                return
+            raise RuntimeError(f"Page watch timer not satisfied before submit: {watched}s/{required}s")
+        if "Keep watching" in body or "Press play to start watching" in body:
+            raise RuntimeError("Page watch timer not satisfied before submit")
 
     def fill_result(self, result: dict[str, Any]) -> None:
-        """Fill the scoring form using form_plan. Waits for page watch timer first."""
+        """Fill the scoring form using form_plan."""
         plan = result.get("form_plan", {})
         if not plan.get("can_fill"):
             return
-
-        # Ensure page's built-in 30s timer is satisfied before filling
-        self._wait_for_page_watch_timer()
 
         import time
         click_events = plan.get("click_events", ["mousedown", "mouseup", "click"])
@@ -332,9 +475,17 @@ class PrismaXControlAdapter:
             raise RuntimeError("Submit button not found")
         if btn.get_attribute("disabled") is not None:
             raise RuntimeError("Submit button still disabled — form not fully filled")
+        self._assert_page_watch_timer_satisfied()
         btn.first.click()
-        time.sleep(3)
-
+        time.sleep(1)
+        timer = self._read_page_watch_timer()
+        body = self._page.locator("body").inner_text()
+        if timer:
+            watched, required = timer
+            raise RuntimeError(f"PrismaX rejected submit: watch timer {watched}s/{required}s")
+        if "You need more time on this episode" in body or "Keep watching" in body:
+            raise RuntimeError("PrismaX rejected submit: page watch timer not satisfied")
+        time.sleep(2)
 
     def capture_current_episode_frames(self) -> dict[str, Any]:
         """Capture frames from review-page videos.
@@ -360,61 +511,9 @@ class PrismaXControlAdapter:
         body = self._page.locator("body").inner_text()
         task_prompt = self._extract_task_prompt(body)
 
-        # Use playback mode: play ALL segments at 1x speed, capture frames during playback.
-        # This satisfies the page timer naturally and simulates human viewing.
         if capture_cfg.get("playback", {}).get("enabled", True):
             return self._capture_with_playback(episode_id, safe_episode_id, task_prompt, frame_root, view_names, capture_cfg)
         return self._capture_with_seek(episode_id, safe_episode_id, task_prompt, frame_root, view_names, capture_cfg)
-
-    def _satisfy_page_timer(self, min_seconds: int = 35) -> None:
-        """Satisfy PrismaX's 30s watch timer by seeking videos forward.
-        The page's React timer tracks cumulative video playback time.
-        Seeking video.currentTime past 30s tricks the page into thinking
-        enough time has been watched.
-        """
-        import time
-        body = self._page.locator("body").inner_text()
-        if "Keep watching" not in body:
-            return
-
-        self._page.evaluate("""() => {
-            const o = document.querySelector('[class*="playOverlay"]');
-            if (o) o.click();
-        }""")
-        time.sleep(2)
-        # Start playing, then seek forward to fake elapsed watch time
-        self._page.evaluate(f"""(targetSec) => {{
-            document.querySelectorAll('video').forEach(v => {{
-                v.muted = true;
-                v.play().catch(() => {{}});
-                // After a short delay, seek forward
-                setTimeout(() => {{
-                    if (v.duration > 0 && v.duration > targetSec) {{
-                        v.currentTime = targetSec;
-                    }} else if (v.duration > 0) {{
-                        v.currentTime = v.duration - 0.5;
-                    }}
-                    v.dispatchEvent(new Event('timeupdate', {{bubbles: true}}));
-                    v.dispatchEvent(new Event('progress', {{bubbles: true}}));
-                    v.dispatchEvent(new Event('seeked', {{bubbles: true}}));
-                }}, 1500);
-            }});
-        }}""", min_seconds)
-        # Wait for seek to take effect + React to process
-        time.sleep(3)
-        body = self._page.locator("body").inner_text()
-        if "Keep watching" not in body:
-            return
-        # If still showing, brute force: remove the warning
-        self._page.evaluate("""() => {
-            document.querySelectorAll('*').forEach(el => {
-                const text = (el.textContent || '').trim();
-                if (/Keep watching|Press play to start/i.test(text) && text.length < 120) {
-                    const container = el.closest('[class*="overlay"], [class*="Overlay"], [class*="modal"], [class*="Modal"], [class*="toast"], [class*="Toast"]') || el;
-                    container.remove();
-                }
-            });
-        }""")
 
     # ── playback mode ──────────────────────────────────────────
 
@@ -422,74 +521,91 @@ class PrismaXControlAdapter:
         self, episode_id: str, safe_id: str, task_prompt: str,
         frame_root, view_names: list[str], capture_cfg: dict[str, Any],
     ) -> dict[str, Any]:
-        """Real human-like playback: play EVERY segment at 1x speed,
-        watch >=min_watch_seconds per segment, capture frames during playback.
-        Does NOT skip segments — simulates a real validator watching everything.
-        """
+        """Real playback: play each video segment, capture frames during playback."""
         import time
 
         pb_cfg = capture_cfg.get("playback", {})
         min_watch = float(pb_cfg.get("min_watch_seconds", 30))
         capture_interval = float(pb_cfg.get("capture_interval_seconds", 4))
+        speed = float(pb_cfg.get("speed_multiplier", 1))
         max_segments = int(pb_cfg.get("max_segments", 20))
 
+        # Detect segment count from page
         body = self._page.locator("body").inner_text()
         segments_total = self._detect_segment_count(body, page=self._page)
-        nav_available = self._page.locator("[class*='DataQAReview_navBtn']").count() >= 2
-        if segments_total < 2 and not nav_available:
-            segments_total = 1
-
-        print(f"  Playback: {segments_total} segment(s), ~{min_watch}s each")
 
         frame_paths: dict[str, list[str]] = {}
         video_sources: dict[str, str] = {}
         errors: list[str] = []
-        total_wall = 0.0
+        total_video_watch = 0.0
+        total_wall_watch = 0.0
         segments_seen = 0
 
-        for seg_idx in range(segments_total):
+        for seg_idx in range(min(segments_total, max_segments)):
             if seg_idx > 0:
+                # Navigate to next segment
                 navs = self._page.locator("[class*='DataQAReview_navBtn']")
                 if navs.count() >= 2:
-                    navs.nth(1).click()
-                    time.sleep(3)
+                    try:
+                        navs.nth(1).click()
+                        time.sleep(2)
+                    except Exception:
+                        break
                 else:
                     break
 
-            print(f"    seg{seg_idx+1}/{segments_total}: playing...", end=" ", flush=True)
+            # Ensure videos play through normal page interactions.
+            self._start_page_video_playback()
+            time.sleep(1.5)
 
-            # Click play overlay + start videos (DO NOT reset currentTime — timer accumulates)
-            self._page.evaluate("""() => {
-                const o = document.querySelector('[class*="playOverlay"]');
-                if (o) o.click();
-                document.querySelectorAll('video').forEach(v => {
-                    v.muted = true;
-                    v.play().catch(() => {});
-                });
-            }""")
-            time.sleep(2)  # let videos start
-
-            seg_frames: dict[str, list[str]] = {}
-            seg_start = time.monotonic()
-
-            # Watch for min_watch real seconds, capturing frames along the way
-            elapsed = 0.0
-            while elapsed < min_watch:
-                # Keep videos playing (page timer needs this)
-                self._page.evaluate("""() => {
-                    document.querySelectorAll('video').forEach(v => {
-                        if (v.paused) { v.muted = true; v.play().catch(() => {}); }
-                    });
+            # Wait for at least one video ready
+            for _ in range(15):
+                ready = self._page.evaluate("""() => {
+                    for (const v of document.querySelectorAll('video'))
+                        if (v.readyState >= 2 && v.videoWidth > 0 && !v.paused) return true;
+                    return false;
                 }""")
+                if ready:
+                    break
+                time.sleep(0.5)
 
-                # Capture frame from each view
-                timestamp = int(elapsed)
+            seg_start = time.monotonic()
+            seg_frames: dict[str, list[str]] = {}
+            seg_watch = 0.0
+
+            # Capture frames during playback
+            while seg_watch < min_watch:
+                # Check if video ended
+                all_ended = self._page.evaluate("""() => {
+                    const vs = document.querySelectorAll('video');
+                    if (vs.length === 0) return true;
+                    return Array.from(vs).every(v => v.ended || v.currentTime >= v.duration - 0.5);
+                }""")
+                if all_ended:
+                    break
+
+                # Check if videos froze (no progress in 5 seconds)
+                progress_made = self._page.evaluate("""() => {
+                    for (const v of document.querySelectorAll('video'))
+                        if (v.readyState >= 2 && !v.paused && !v.ended && v.currentTime > 0.1) return true;
+                    return false;
+                }""")
+                if not progress_made:
+                    # Try to resume playback without seeking or resetting the timer.
+                    self._start_page_video_playback()
+                    time.sleep(1)
+                    seg_watch += 1  # count attempted time
+
+                # Screenshot each visible video
+                timestamp = int(seg_watch)
                 for vi, view in enumerate(view_names):
                     try:
                         els = self._page.locator("video")
-                        if vi >= els.count(): break
+                        if vi >= els.count():
+                            break
                         box = els.nth(vi).bounding_box()
-                        if not box or box["width"] < 10: continue
+                        if not box or box["width"] < 10:
+                            continue
                         out = frame_root / f"{view}_seg{seg_idx+1:02d}_t{timestamp:03d}s.jpg"
                         self._page.screenshot(
                             path=str(out),
@@ -511,19 +627,24 @@ class PrismaXControlAdapter:
                     except Exception as exc:
                         errors.append(f"{view}:seg{seg_idx+1}:t{timestamp}:{type(exc).__name__}")
 
+                # Real-time sleep: speed=1 means watch time = wall time
                 time.sleep(max(0.05, capture_interval))
-                elapsed += capture_interval
+                seg_watch += capture_interval
 
             wall_elapsed = time.monotonic() - seg_start
+            total_video_watch += seg_watch
+            total_wall_watch += wall_elapsed
             segments_seen += 1
-            total_wall += wall_elapsed
 
             for view, paths in seg_frames.items():
                 frame_paths.setdefault(view, []).extend(paths)
-            print(f"{len(seg_frames)} views, {sum(len(p) for p in seg_frames.values())} frames, {wall_elapsed:.0f}s wall")
+            # Do NOT break — watch ALL segments
+
+        self._wait_for_page_watch_timer(int(min_watch) + 5)
+        page_timer = self._read_page_watch_timer()
 
         if not any(frame_paths.values()):
-            raise RuntimeError("No review video frames captured")
+            raise RuntimeError("No review video frames captured; playback produced no usable frames")
 
         return {
             "episode_id": episode_id,
@@ -536,10 +657,17 @@ class PrismaXControlAdapter:
                 "url": self._page.url,
                 "capture_method": "playback",
                 "capture_errors": errors,
-                "wall_watch_seconds": round(total_wall, 1),
+                "wall_watch_seconds": round(total_wall_watch, 1),
+                "video_watch_seconds": round(total_video_watch, 1),
                 "segments_total": segments_total,
                 "segments_seen": segments_seen,
                 "all_segments_seen": segments_seen >= segments_total if segments_total > 0 else False,
+                "playback_start": self._last_playback_start,
+                "page_watch_timer": {
+                    "watched_seconds": page_timer[0] if page_timer else None,
+                    "required_seconds": page_timer[1] if page_timer else None,
+                    "satisfied": bool(page_timer and page_timer[0] >= page_timer[1] > 0),
+                },
             },
         }
 
@@ -578,20 +706,6 @@ class PrismaXControlAdapter:
         points = capture_cfg.get("percent_points", [0, 10, 25, 50, 75, 90, 100])
         wait_seconds = float(capture_cfg.get("wait_until_ready_seconds", 8))
         warmup_seconds = float(capture_cfg.get("warmup_play_seconds", 1.0))
-
-        # Ensure videos are loaded before seeking (may have been paused/ended by timer playback)
-        self._page.evaluate("""() => {
-            const o = document.querySelector('[class*="playOverlay"]');
-            if (o) o.click();
-        }""")
-        time.sleep(1.5)
-        self._page.evaluate("""() => {
-            document.querySelectorAll('video').forEach(v => {
-                v.muted = true;
-                v.play().catch(() => {});
-            });
-        }""")
-        time.sleep(2)
         min_nonblack_ratio = float(capture_cfg.get("min_nonblack_ratio", 0.70))
         video_count = int(self._page.evaluate("""
             () => Array.from(document.querySelectorAll('video')).filter(v => {
@@ -655,7 +769,9 @@ class PrismaXControlAdapter:
                     "min_nonblack_ratio": min_nonblack_ratio,
                 },
                 "captured_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "episode_id": episode_id,
+                "progress": episode.get("progress"),
+                "task_id": episode.get("task_id"),
+                "upload_id": episode.get("upload_id"),
             },
         }
 
@@ -682,12 +798,6 @@ class PrismaXControlAdapter:
                     await sleep(250);
                 }
                 if (!(v.videoWidth > 0 && v.videoHeight > 0)) return {ok: false, error: 'video_not_ready'};
-                try {
-                    v.muted = true;
-                    await v.play().catch(() => null);
-                    await sleep(Math.max(0, warmupSeconds) * 1000);
-                    v.pause();
-                } catch (e) {}
                 const duration = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0;
                 if (duration > 0) {
                     const target = Math.max(0.05, Math.min(duration - 0.05, duration * percent / 100));
@@ -919,3 +1029,10 @@ def iter_local_episodes(video_dir: str | Path) -> Iterator[dict[str, Any]]:
                 "video_paths": seg_list[0]["video_paths"],
                 "metadata": {"source": "local_folder"},
             }
+
+
+
+
+
+
+

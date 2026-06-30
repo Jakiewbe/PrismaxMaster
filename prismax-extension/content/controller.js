@@ -139,7 +139,7 @@ var PX = PX || {};
 
             const endBtn = findButton(['End Tele-Operation', 'End Session', 'End Control', 'Stop Validating']);
             const queueBtn = findButton(['Leave', 'Leave Queue', 'Waiting', 'Position', 'Queued', 'In Queue']);
-            const enterBtn = PX.Utils.findValidationEntryButton ? PX.Utils.findValidationEntryButton() : findButton(['Enter Live Control', 'Join Queue', 'Enter Pool', 'Begin Validating', 'Start Validating', 'Control Now']);
+            const enterBtn = PX.Utils.findValidationEntryButton ? PX.Utils.findValidationEntryButton() : findButton(['Enter Live Control', 'Join Queue', 'Enter Pool', 'Control Now']);
 
             const oldState = {
                 isOperating: state.isOperating,
@@ -435,6 +435,7 @@ var PX = PX || {};
                 consecutiveAnomalies: state.consecutiveAnomalies,
                 anomalyCooldownUntil: state.anomalyCooldownUntil,
                 rank: state.lastRank,
+                currentArm: PX.Storage && PX.Storage.getCurrentArm ? PX.Storage.getCurrentArm() : '',
                 performanceMode: state.isInStandbyMode ? 'high_rank_standby' : 'normal',
                 loopHeartbeatAt: state.loopHeartbeatAt,
                 lastScriptError: state.lastScriptError,
@@ -607,6 +608,7 @@ var PX = PX || {};
                     ? Math.floor((Date.now() - state.sessionStartTime) / 1000)
                     : 0,
                 rank: state.lastRank,
+                currentArm: PX.Storage && PX.Storage.getCurrentArm ? PX.Storage.getCurrentArm() : '',
                 performanceMode: state.isInStandbyMode ? 'high_rank_standby' : 'normal',
                 loopHeartbeatAt: state.loopHeartbeatAt,
                 lastScriptError: state.lastScriptError,
@@ -668,3 +670,4 @@ var PX = PX || {};
 
     PX.createController = createController;
 })();
+
