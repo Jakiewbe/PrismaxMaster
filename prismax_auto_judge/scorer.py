@@ -316,8 +316,10 @@ class PrismaXScorer:
                 scores=scores, pass_probability=pass_probability, failure_modes=vlm["failure_modes"], vlm=vlm_log,
             )
 
+        # v3: middle ground → PASS (optimistic), but only submit with high confidence
         return self._result(
-            episode_id, "UNCERTAIN", False, confidence, "medium", vlm["reason"], features,
+            episode_id, "PASS", confidence >= thresholds["min_confidence_submit"],
+            confidence, "medium", vlm["reason"], features,
             hard_fail_reasons, suspicious_reasons, triggered_thresholds, frames=frames,
             scores=scores, pass_probability=pass_probability, failure_modes=vlm["failure_modes"], vlm=vlm_log,
         )

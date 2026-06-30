@@ -1,5 +1,5 @@
 runtime:
-  mode: "dry_run"  # dry_run / assist_preview / assist_fill / auto / auto_limited
+  mode: "auto_limited"
   auto_submit: false
   skip_uncertain: true
   save_log: true
@@ -194,7 +194,7 @@ rules:
     suspicious: 0.55
 
 decision_thresholds:
-  auto_pass_min_probability: 0.85
+  auto_pass_min_probability: 0.50
   auto_fail_max_probability: 0.15
   min_confidence_submit: 0.85
 
