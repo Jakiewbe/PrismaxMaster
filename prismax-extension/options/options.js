@@ -130,7 +130,7 @@ function collectConfig() {
             },
 
             text: {
-                enter: ["Enter Live Control", "Join Queue", "Enter Pool", "Begin Validating", "Start Validating", "Control Now"],
+                enter: ["Enter Live Control", "Join Queue", "Enter Pool", "Control Now"],
                 end: ["End Tele-Operation", "End Session", "End Control", "Stop Validating"],
                 queuing: ["Leave", "Leave Queue", "Waiting", "Position", "Queued", "In Queue"],
                 liveChat: ["Live Chat", "Open Live Chat"],
@@ -248,3 +248,4 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('btn-export').addEventListener('click', exportConfig);
     document.getElementById('btn-import').addEventListener('click', importConfig);
 });
+

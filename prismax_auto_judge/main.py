@@ -238,6 +238,49 @@ def _set_vla_state(vla_active: bool, state_path: str = "../prismax_state.json") 
     return True
 
 
+
+def run_live_episode(
+    adapter: PrismaXControlAdapter,
+    scorer: PrismaXScorer,
+    logger: JsonlLogger,
+    workflow: DailyWorkflowPolicy,
+    config: dict[str, Any],
+    config_hash: str,
+    mode: str,
+    step: str,
+    auto_submit_count: int,
+) -> tuple[bool, int, dict[str, Any]]:
+    """Process one VLA review episode. Returns (continue_allowed, auto_submit_count, control_record)."""
+    if not adapter.open_first_review():
+        raise RuntimeError("No Review & Earn item opened")
+    print(f"review opened: {adapter.get_current_episode()}")
+    if step == "open-first":
+        return False, auto_submit_count, make_control_record(mode)
+
+    episode = adapter.capture_current_episode_frames()
+    print_capture_summary(episode)
+    if step == "capture":
+        return False, auto_submit_count, make_control_record(mode)
+
+    result = score_captured_episode(scorer, episode)
+    control_record = make_control_record(mode)
+    if step in {"fill", "submit", "full"}:
+        active_mode = mode
+        if step == "fill" and active_mode == "assist_preview":
+            active_mode = "assist_fill"
+        if step == "submit" and active_mode not in {"auto", "auto_limited"}:
+            raise RuntimeError("submit step requires runtime.mode auto or auto_limited")
+        control_record, auto_submit_count = apply_live_mode(adapter, result, active_mode, config, auto_submit_count)
+        workflow.record_vla_result(bool(control_record.get("submitted")))
+
+    logger.write(build_log_record(episode, result, mode, config_hash, scorer.version, control_record))
+    print(f"result: {result['decision']} submit={control_record['submitted']} status={control_record['submit_status']}")
+
+    if step != "full":
+        return False, auto_submit_count, control_record
+    if not control_record.get("submitted"):
+        return False, auto_submit_count, control_record
+    return True, auto_submit_count, control_record
 def run_live_once(
     config: dict[str, Any],
     config_hash: str,
@@ -251,7 +294,7 @@ def run_live_once(
     print(f"workflow: {reason}")
     if step == "workflow":
         return 0 if allowed else 2
-    readonly_steps = {"open-review", "open-first", "capture", "score", "fill", "return-arm"}
+    readonly_steps = {"return-arm"}
     if not allowed and step not in readonly_steps:
         return 2
 
@@ -261,7 +304,7 @@ def run_live_once(
     auto_submit_count = 0
     try:
         _set_vla_state(True)
-        adapter.open_page()
+        adapter.open_page(open_review=step != "return-arm")
         if step == "return-arm":
             ok = adapter.return_to_arm_queue()
             print(f"return_to_arm_queue: {ok}")
@@ -269,28 +312,36 @@ def run_live_once(
         if step == "open-review":
             print("review list opened")
             return 0
-        if not adapter.open_first_review():
-            raise RuntimeError("No Review & Earn item opened")
-        print(f"review opened: {adapter.get_current_episode()}")
-        if step == "open-first":
-            return 0
-        episode = adapter.capture_current_episode_frames()
-        print_capture_summary(episode)
-        if step == "capture":
-            return 0
-        result = score_captured_episode(scorer, episode)
-        control_record = make_control_record(mode)
-        if step in {"fill", "submit", "full"}:
-            active_mode = mode
-            if step == "fill" and active_mode == "assist_preview":
-                active_mode = "assist_fill"
-            if step == "submit" and active_mode not in {"auto", "auto_limited"}:
-                raise RuntimeError("submit step requires runtime.mode auto or auto_limited")
-            control_record, auto_submit_count = apply_live_mode(adapter, result, active_mode, config, auto_submit_count)
-            workflow.record_vla_result(bool(control_record.get("submitted")))
-        logger.write(build_log_record(episode, result, mode, config_hash, scorer.version, control_record))
-        print(f"result: {result['decision']} submit={control_record['submitted']} status={control_record['submit_status']}")
-        if return_arm or step == "return-arm" or (step == "full" and config.get("post_vla", {}).get("return_to_arm_queue", True)):
+
+        if step == "full":
+            target = int(config.get("daily_workflow", {}).get("min_labels_per_day", 1))
+            max_labels = int(config.get("daily_workflow", {}).get("max_labels_per_day", target))
+            processed = 0
+            while True:
+                allowed, reason = workflow.can_attempt_vla()
+                print(f"workflow_loop: {reason}")
+                if not allowed:
+                    break
+                submitted_today = workflow.get_today_label_count()
+                if submitted_today >= max_labels or (processed > 0 and submitted_today >= target):
+                    break
+                should_continue, auto_submit_count, control_record = run_live_episode(
+                    adapter, scorer, logger, workflow, config, config_hash, mode, step, auto_submit_count
+                )
+                processed += 1
+                if not should_continue:
+                    break
+                adapter.open_page(open_review=True)
+            if config.get("post_vla", {}).get("return_to_arm_queue", True):
+                ok = adapter.return_to_arm_queue()
+                print(f"return_to_arm_queue: {ok}")
+                return 0 if ok else 3
+            return 0 if processed > 0 else 2
+
+        should_continue, auto_submit_count, control_record = run_live_episode(
+            adapter, scorer, logger, workflow, config, config_hash, mode, step, auto_submit_count
+        )
+        if return_arm:
             ok = adapter.return_to_arm_queue()
             print(f"return_to_arm_queue: {ok}")
             return 0 if ok else 3
@@ -298,7 +349,6 @@ def run_live_once(
     finally:
         _set_vla_state(False)
         adapter.close()
-
 
 def run_local_batch(config: dict[str, Any], config_hash: str, video_dir: str | None = None) -> int:
     runtime = config["runtime"]
@@ -360,3 +410,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
