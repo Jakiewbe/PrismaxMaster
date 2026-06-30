@@ -100,3 +100,5 @@ Return ONLY valid JSON. No markdown, no commentary.
 }
 
 failure_modes must use labels from [dropped_object, missed_grasp, wrong_target, collision, partial_completion, abandoned_task, excessive_retries, frozen, out_of_frame, lighting_issue, camera_obstruction, camera_not_synced, none].
+
+CRITICAL: robot_control_quality, movement_smoothness, task_completion_speed, task_fully_completed MUST NOT all be the same value. Spread them across 1-5 based on what you actually observe. If the robot moved smoothly but failed to complete: smooth=4 or 5 AND done=1 or 2. If motion was jerky but task was finished: smooth=1 or 2 AND done=4 or 5. Do NOT default everything to 3.

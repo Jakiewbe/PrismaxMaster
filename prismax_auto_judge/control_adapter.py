@@ -906,13 +906,31 @@ class PrismaXControlAdapter:
         return False
 
     def _extract_task_prompt(self, body_text: str) -> str:
-        lines = [line.strip() for line in body_text.splitlines() if line.strip()]
+        # v2: use DOM selector first (most reliable)
+        try:
+            if self._page:
+                el = self._page.locator(".DataQAReview_scenarioTrigger__qCwVC").first
+                if el.count() > 0:
+                    text = (el.text_content() or "").strip()
+                    if text and len(text) > 2 and not text.startswith("Episode"):
+                        return text[:500]
+        except Exception:
+            pass
+        # Fallback: search body text
+        import re
+        for pattern in [r"Sort\s+.+", r"Pick\s+and\s+place.+", r"Organize\s+.+",
+                        r"Pack\s+.+", r"Insert\s+.+", r"Open\s+.+", r"Close\s+.+"]:
+            m = re.search(pattern, body_text, re.IGNORECASE)
+            if m:
+                return m.group(0).strip()[:500]
+        # Last resort: keyword-based extraction (for unit tests)
+        lines = [l.strip() for l in body_text.splitlines() if l.strip()]
         for idx, line in enumerate(lines):
             lower = line.lower()
-            if any(key in lower for key in ["instruction", "task prompt", "task", "prompt"]):
-                if idx + 1 < len(lines):
+            if any(k in lower for k in ["instruction:", "task prompt", "instructed:", "task:"]):
+                if idx + 1 < len(lines) and lines[idx + 1] and not lines[idx + 1].startswith(("Pass", "Fail", "Clear", "Robot")):
                     return lines[idx + 1][:500]
-                return line[:500]
+                return line.split(":", 1)[-1].strip()[:500] if ":" in line else line[:500]
         return ""
 
     def _resolve_package_path(self, value: str | Path) -> Path:
