@@ -17,7 +17,7 @@ const DEFAULTS = {
     morningWindowStart: '08:01',
     morningWindowEnd: '08:06',
 
-    commentTaskEnabled: 'true',
+    commentTaskEnabled: 'false',
     commentWindowStart: '00:00',
     commentWindowEnd: '00:05',
     commentCountMin: 5,

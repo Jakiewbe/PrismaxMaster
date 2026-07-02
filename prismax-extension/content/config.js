@@ -58,6 +58,7 @@ var PX = PX || {};
             // v2: text-based selectors replace hardcoded XPaths
             trainingGoldLabel: 'Training Arm Gold',
             arenaArmLabel: 'Arena Arm',
+            fallbackArmLabels: ['Arena Arm', 'Training Arm Black', 'Private Arm'],
             armCardSelector: '[class*="TeleOpSelection_robotName"]',
             armCardContainer: '[class*="TeleOpSelection_robotCard"]',
             robotCenterURL: 'https://app.prismax.ai/robots-center',
@@ -70,7 +71,7 @@ var PX = PX || {};
         },
 
         commentTask: {
-            enabled: true,
+            enabled: false,
             windowStart: "00:00",
             windowEnd: "00:05",
             randomInsideWindow: true,

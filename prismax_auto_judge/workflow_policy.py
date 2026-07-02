@@ -26,6 +26,13 @@ class DailyWorkflowPolicy:
         if done >= max_labels:
             return False, f"daily_vla_quota_reached:{done}/{max_labels}"
 
+        max_tasks = self.workflow.get("max_vla_tasks_per_day")
+        if max_tasks is not None:
+            tasks_done = self.get_today_task_count()
+            max_tasks_int = int(max_tasks)
+            if tasks_done >= max_tasks_int:
+                return False, f"daily_vla_task_quota_reached:{tasks_done}/{max_tasks_int}"
+
         if self.workflow.get("control_first", True):
             ready, reason = self.is_control_ready()
             if not ready:
@@ -37,6 +44,22 @@ class DailyWorkflowPolicy:
         data = self._read_counts()
         item = data.get(self.today(), {})
         return int(item.get("submitted", 0))
+
+    def get_today_task_count(self) -> int:
+        data = self._read_counts()
+        item = data.get(self.today(), {})
+        return int(item.get("tasks_attempted", item.get("tasks", 0)))
+
+    def record_vla_task_result(self, completed: bool, episodes_seen: int, episodes_submitted: int) -> None:
+        data = self._read_counts()
+        today = self.today()
+        item = data.setdefault(today, {"seen": 0, "submitted": 0})
+        item["tasks_attempted"] = int(item.get("tasks_attempted", 0)) + 1
+        if completed:
+            item["tasks_completed"] = int(item.get("tasks_completed", 0)) + 1
+        item["task_episode_seen"] = int(item.get("task_episode_seen", 0)) + int(episodes_seen)
+        item["task_episode_submitted"] = int(item.get("task_episode_submitted", 0)) + int(episodes_submitted)
+        self._counts_path().write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
     def record_vla_result(self, submitted: bool) -> None:
         data = self._read_counts()
@@ -58,6 +81,11 @@ class DailyWorkflowPolicy:
         except (OSError, json.JSONDecodeError) as exc:
             return False, f"control_state_unreadable:{exc}"
 
+        if self.workflow.get("require_control_idle_before_vla", True):
+            idle, idle_reason = self.is_control_idle_for_vla(state)
+            if not idle:
+                return False, idle_reason
+
         min_ops = int(self.workflow.get("min_control_operations_before_vla", 1))
         total_ops = int(state.get("totalOperations", state.get("count", 0)) or 0)
         if total_ops >= min_ops:
@@ -73,6 +101,18 @@ class DailyWorkflowPolicy:
         if rank_threshold is not None:
             return False, f"control_operations_below_threshold:{total_ops}/{min_ops};rank={rank};need_rank_gt:{rank_threshold}"
         return False, f"control_operations_below_threshold:{total_ops}/{min_ops}"
+
+    def is_control_idle_for_vla(self, state: dict[str, Any]) -> tuple[bool, str]:
+        if bool(state.get("isOperating")):
+            return False, "control_not_idle_for_vla:isOperating"
+        if bool(state.get("isQueuing")):
+            return False, "control_not_idle_for_vla:isQueuing"
+        if bool(state.get("walletPopupActive")):
+            return False, "control_not_idle_for_vla:walletPopupActive"
+        owner = state.get("actionLockOwner")
+        if owner:
+            return False, f"control_not_idle_for_vla:actionLockOwner={owner}"
+        return True, "control_idle_for_vla"
 
     def _read_rank(self, state: dict[str, Any]) -> int | None:
         for key in ("goldRank", "trainingGoldRank"):
@@ -130,5 +170,4 @@ class DailyWorkflowPolicy:
         if path.is_absolute():
             return path
         return self.base_dir / path
-
 

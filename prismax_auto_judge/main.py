@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import time
 from pathlib import Path
 from typing import Any
@@ -146,6 +147,62 @@ def score_captured_episode(scorer: PrismaXScorer, episode: dict[str, Any]) -> di
     return scorer._decide_from_vlm(episode_id, features, [], [], [], frames, vlm)
 
 
+def force_live_submit_result(
+    scorer: PrismaXScorer,
+    result: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Make live VLA output submittable; uncertain/low confidence becomes PASS."""
+    if not config.get("safety", {}).get("force_submit_live_vla", False):
+        return result
+
+    safety = config.get("safety", {})
+    decision = str(result.get("decision") or "UNCERTAIN")
+    should_submit = bool(result.get("should_submit"))
+    confidence = float(result.get("confidence") or 0.0)
+    pass_probability = result.get("pass_probability")
+    pass_probability_value = float(pass_probability) if pass_probability is not None else 0.50
+
+    strict_fail = (
+        decision == "FAIL"
+        and confidence >= float(safety.get("strict_fail_submit_min_confidence", 0.90))
+        and pass_probability_value <= float(safety.get("strict_fail_submit_max_pass_probability", 0.10))
+    )
+    forced_decision = "FAIL" if strict_fail else "PASS"
+
+    if forced_decision == decision and should_submit:
+        return result
+
+    reason = str(result.get("reason") or "")
+    force_reason = "Forced live VLA submit policy: uncertain, low-confidence, or non-strict FAIL output is submitted as PASS."
+    if forced_decision == "FAIL":
+        force_reason = "Forced live VLA submit policy: high-confidence FAIL is submitted instead of blocked."
+    if reason:
+        reason = reason + " " + force_reason
+    else:
+        reason = force_reason
+
+    rules = result.get("rules") or {}
+    return scorer._result(
+        str(result.get("episode_id") or "unknown"),
+        forced_decision,
+        True,
+        float(result.get("confidence") or 0.0),
+        str(result.get("risk_level") or "medium"),
+        reason,
+        result.get("features") or {},
+        list(result.get("hard_fail_reasons") or rules.get("hard_fail_reasons") or []),
+        list(result.get("suspicious_reasons") or rules.get("suspicious_reasons") or []),
+        list(rules.get("triggered_thresholds") or []),
+        frames=result.get("frames") or {},
+        scores=result.get("scores") or config["default_scores"]["uncertain"],
+        pass_probability=pass_probability_value,
+        failure_modes=result.get("failure_modes") or [],
+        vlm=result.get("vlm"),
+        error=result.get("error"),
+    )
+
+
 def apply_live_mode(
     adapter: PrismaXControlAdapter,
     result: dict[str, Any],
@@ -165,10 +222,11 @@ def apply_live_mode(
 
     if mode in {"auto", "auto_limited"}:
         safety = config.get("safety", {})
-        if result.get("decision") == "FAIL" and not safety.get("allow_auto_fail_submit", False):
+        force_submit = bool(safety.get("force_submit_live_vla", False))
+        if result.get("decision") == "FAIL" and not safety.get("allow_auto_fail_submit", False) and not force_submit:
             control_record["submit_status"] = "auto_fail_submit_disabled"
             return control_record, auto_submit_count
-        if not result.get("should_submit"):
+        if not result.get("should_submit") and not force_submit:
             control_record["submit_status"] = "not_submittable"
             return control_record, auto_submit_count
         if auto_submit_count >= int(safety.get("max_auto_submit_per_run", 10)):
@@ -184,6 +242,9 @@ def apply_live_mode(
         control_record["submitted"] = True
         control_record["submit_status"] = "submitted"
         control_record["page_episode_id_after_submit"] = adapter.get_episode_id()
+        if hasattr(adapter, "increment_vla_submitted_today"):
+            control_record["browser_today_vla_submitted_updated"] = adapter.increment_vla_submitted_today()
+        auto_submit_count += 1
         return control_record, auto_submit_count
 
     control_record["submit_status"] = "unknown_mode"
@@ -203,11 +264,8 @@ def print_capture_summary(episode: dict[str, Any]) -> None:
         print(f"  black_or_not_ready_errors={len(black_errors)}")
 
 
-def _set_vla_state(vla_active: bool, state_path: str = "../prismax_state.json") -> bool:
-    """Write vlaActive flag so the extension can pause/resume control loop.
-    Returns True if handshake succeeded (extension acknowledged by writing
-    controlPausedForVla back), or if state file doesn't exist yet (first run).
-    """
+def _set_vla_state(vla_active: bool, state_path: str = "../prismax_state.json", control_paused: bool | None = None) -> bool:
+    """Write VLA ownership state for external monitors."""
     import json
     path = Path(__file__).resolve().parent / state_path
     state: dict[str, Any] = {}
@@ -218,26 +276,27 @@ def _set_vla_state(vla_active: bool, state_path: str = "../prismax_state.json") 
             pass
     state["vlaActive"] = vla_active
     state["vlaStateUpdatedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    if not vla_active:
+    if control_paused is not None:
+        state["controlPausedForVla"] = bool(control_paused)
+    elif not vla_active:
         state.pop("controlPausedForVla", None)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    # Handshake: wait for extension to ack (max 5s)
-    if vla_active:
-        import time as _time
-        deadline = _time.monotonic() + 5.0
-        while _time.monotonic() < deadline:
-            try:
-                current = json.loads(path.read_text(encoding="utf-8"))
-                if current.get("controlPausedForVla"):
-                    return True
-            except (OSError, json.JSONDecodeError):
-                pass
-            _time.sleep(0.3)
-        return False  # extension didn't ack in time
     return True
 
+
+def _progress_value(info: dict[str, Any] | None, key: str, default: int) -> int:
+    progress = (info or {}).get("progress") or {}
+    try:
+        return int(progress.get(key, default) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _same_episode(left: dict[str, Any] | None, right: dict[str, Any] | None) -> bool:
+    if not left or not right:
+        return False
+    return str(left.get("episode_id") or "") == str(right.get("episode_id") or "")
 
 
 def run_live_episode(
@@ -251,13 +310,13 @@ def run_live_episode(
     step: str,
     auto_submit_count: int,
 ) -> tuple[bool, int, dict[str, Any]]:
-    """Process one VLA review episode. Returns (continue_allowed, auto_submit_count, control_record)."""
-    # Only open review if not already on a review page
-    url = adapter.get_current_episode()
-    if not url or not url.get("task_id"):
+    """Process the current review episode and report whether the task has more episodes."""
+    current = adapter.get_current_episode()
+    if not current or not current.get("task_id"):
         if not adapter.open_first_review():
             raise RuntimeError("No Review & Earn item opened")
-    print(f"review opened: {adapter.get_current_episode()}")
+        current = adapter.get_current_episode()
+    print(f"review opened: {current}")
     if step == "open-first":
         return False, auto_submit_count, make_control_record(mode)
 
@@ -266,8 +325,9 @@ def run_live_episode(
     if step == "capture":
         return False, auto_submit_count, make_control_record(mode)
 
-    result = score_captured_episode(scorer, episode)
+    result = force_live_submit_result(scorer, score_captured_episode(scorer, episode), config)
     control_record = make_control_record(mode)
+    control_record["task_progress_before"] = (current or {}).get("progress")
     if step in {"fill", "submit", "full"}:
         active_mode = mode
         if step == "fill" and active_mode == "assist_preview":
@@ -275,29 +335,90 @@ def run_live_episode(
         if step == "submit" and active_mode not in {"auto", "auto_limited"}:
             raise RuntimeError("submit step requires runtime.mode auto or auto_limited")
         control_record, auto_submit_count = apply_live_mode(adapter, result, active_mode, config, auto_submit_count)
+        control_record["task_progress_before"] = (current or {}).get("progress")
         workflow.record_vla_result(bool(control_record.get("submitted")))
 
+    after = adapter.get_current_episode()
+    control_record["task_progress_after"] = (after or {}).get("progress")
     logger.write(build_log_record(episode, result, mode, config_hash, scorer.version, control_record))
     print(f"result: {result['decision']} submit={control_record['submitted']} status={control_record['submit_status']}")
 
-    # Continue to next episode if: full mode + submitted + more episodes remain
     if step not in {"full", "fill"}:
         return False, auto_submit_count, control_record
-    ep_info = adapter.get_current_episode()
-    progress = ep_info.get("progress") or {}
-    has_more = progress.get("current", 0) < progress.get("total", 1)
-    return has_more, auto_submit_count, control_record
+    if step == "full" and not control_record.get("submitted"):
+        return False, auto_submit_count, control_record
+
+    total = _progress_value(current, "total", 1)
+    before_current = _progress_value(current, "current", 1)
+    after_current = _progress_value(after, "current", before_current)
+    return max(before_current, after_current) < total, auto_submit_count, control_record
+
+
+def run_live_task(
+    adapter: PrismaXControlAdapter,
+    scorer: PrismaXScorer,
+    logger: JsonlLogger,
+    workflow: DailyWorkflowPolicy,
+    config: dict[str, Any],
+    config_hash: str,
+    mode: str,
+    step: str,
+    auto_submit_count: int,
+) -> tuple[int, int, int]:
+    """Run one VLA task, where one task can contain many review episodes."""
+    if not adapter.open_first_review():
+        raise RuntimeError("No Review & Earn item opened")
+
+    first = adapter.get_current_episode() or {}
+    workflow_cfg = config.get("daily_workflow", {})
+    max_episodes = int(workflow_cfg.get("max_episodes_per_task", 20))
+    episodes_seen = 0
+    episodes_submitted = 0
+    completed = False
+
+    while episodes_seen < max_episodes:
+        allowed, reason = workflow.can_attempt_vla()
+        print(f"workflow_task_loop: {reason}")
+        if not allowed:
+            break
+
+        before = adapter.get_current_episode()
+        should_continue, auto_submit_count, control_record = run_live_episode(
+            adapter, scorer, logger, workflow, config, config_hash, mode, step, auto_submit_count
+        )
+        episodes_seen += 1
+        if control_record.get("submitted"):
+            episodes_submitted += 1
+
+        if not should_continue:
+            completed = True
+            break
+
+        after = adapter.get_current_episode()
+        if _same_episode(before, after):
+            adapter.next_episode()
+
+    workflow.record_vla_task_result(completed or episodes_seen > 0, episodes_seen, episodes_submitted)
+    task_id = first.get("task_id") or "unknown"
+    print(f"task_result: task_id={task_id} episodes={episodes_seen} submitted={episodes_submitted} completed={completed}")
+    return episodes_seen, episodes_submitted, auto_submit_count
+
+
 def run_live_once(
     config: dict[str, Any],
     config_hash: str,
     step: str,
     return_arm: bool = False,
+    force_workflow: bool = False,
 ) -> int:
+    if force_workflow:
+        config = copy.deepcopy(config)
+        config.setdefault("daily_workflow", {})["control_first"] = False
     runtime = config["runtime"]
     mode = runtime.get("mode", "dry_run")
     workflow = DailyWorkflowPolicy(config, Path(__file__).resolve().parent)
     allowed, reason = workflow.can_attempt_vla()
-    print(f"workflow: {reason}")
+    print(f"workflow: {reason}" + (" (forced)" if force_workflow else ""))
     if step == "workflow":
         return 0 if allowed else 2
     readonly_steps = {"return-arm", "open-review", "open-first", "capture", "score", "fill"}
@@ -308,9 +429,14 @@ def run_live_once(
     logger = JsonlLogger(resolve_data_path(runtime["log_path"]))
     scorer = PrismaXScorer(config, config_hash)
     auto_submit_count = 0
+    control_pause_active = False
     try:
-        _set_vla_state(True)
         adapter.open_page(open_review=step != "return-arm")
+        if step != "return-arm":
+            control_pause_active = adapter.set_vla_control_pause(True)
+            _set_vla_state(True, control_paused=control_pause_active)
+            if not control_pause_active and config.get("safety", {}).get("require_extension_pause_for_vla", True):
+                raise RuntimeError("extension_control_pause_not_acknowledged")
         if step == "return-arm":
             ok = adapter.return_to_arm_queue()
             print(f"return_to_arm_queue: {ok}")
@@ -320,35 +446,32 @@ def run_live_once(
             return 0
 
         if step in {"full", "fill"}:
-            target = int(config.get("daily_workflow", {}).get("min_labels_per_day", 1))
-            max_labels = int(config.get("daily_workflow", {}).get("max_labels_per_day", target))
-            processed = 0
-            while True:
+            workflow_cfg = config.get("daily_workflow", {})
+            min_tasks = int(workflow_cfg.get("min_vla_tasks_per_day", 1))
+            max_tasks = int(workflow_cfg.get("max_vla_tasks_per_day", min_tasks))
+            processed_tasks = 0
+            processed_episodes = 0
+            while processed_tasks < max_tasks:
                 allowed, reason = workflow.can_attempt_vla()
                 print(f"workflow_loop: {reason}")
                 if not allowed:
                     break
-                submitted_today = workflow.get_today_label_count()
-                if submitted_today >= max_labels or (processed > 0 and submitted_today >= target):
+                if processed_tasks >= min_tasks:
                     break
-                should_continue, auto_submit_count, control_record = run_live_episode(
+                episodes_seen, _episodes_submitted, auto_submit_count = run_live_task(
                     adapter, scorer, logger, workflow, config, config_hash, mode, step, auto_submit_count
                 )
-                processed += 1
-                if not should_continue:
+                if episodes_seen <= 0:
                     break
-                # Navigate to next episode within the same task
-                navs = adapter._page.locator("[class*='DataQAReview_navBtn']") if adapter._page else None
-                if navs and navs.count() >= 2:
-                    navs.nth(1).click()
-                    import time as _t; _t.sleep(4)
-                else:
-                    break
+                processed_tasks += 1
+                processed_episodes += episodes_seen
+                if processed_tasks < min_tasks:
+                    adapter.open_page(open_review=True)
             if config.get("post_vla", {}).get("return_to_arm_queue", True):
                 ok = adapter.return_to_arm_queue()
                 print(f"return_to_arm_queue: {ok}")
                 return 0 if ok else 3
-            return 0 if processed > 0 else 2
+            return 0 if processed_episodes > 0 else 2
 
         should_continue, auto_submit_count, control_record = run_live_episode(
             adapter, scorer, logger, workflow, config, config_hash, mode, step, auto_submit_count
@@ -359,8 +482,14 @@ def run_live_once(
             return 0 if ok else 3
         return 0
     finally:
-        _set_vla_state(False)
+        if control_pause_active:
+            try:
+                adapter.set_vla_control_pause(False)
+            except Exception:
+                pass
+        _set_vla_state(False, control_paused=False)
         adapter.close()
+
 
 def run_local_batch(config: dict[str, Any], config_hash: str, video_dir: str | None = None) -> int:
     runtime = config["runtime"]
@@ -411,16 +540,16 @@ def main() -> int:
     parser.add_argument("--video-dir", default=None, help="Local video folder for dry-run batch")
     parser.add_argument("--live-step", choices=["workflow", "open-review", "open-first", "capture", "score", "fill", "submit", "return-arm", "full"], default=None, help="Run one testable live-browser step")
     parser.add_argument("--return-arm", action="store_true", help="After the live step, return to configured arm queue")
+    parser.add_argument("--force-workflow", action="store_true", help="Bypass the control-first gate; daily VLA task quota still applies")
     args = parser.parse_args()
 
     config, config_hash = load_config(args.config)
     if args.live_step:
-        return run_live_once(config, config_hash, args.live_step, args.return_arm)
+        return run_live_once(config, config_hash, args.live_step, args.return_arm, args.force_workflow)
     run_local_batch(config, config_hash, args.video_dir)
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 

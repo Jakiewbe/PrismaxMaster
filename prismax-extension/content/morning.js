@@ -12,7 +12,9 @@ var PX = PX || {};
         lock: false,
         watchdogLastHeartbeat: Date.now(),
         watchdogTimer: null,
-        inMorningWindow: false
+        inMorningWindow: false,
+        armAttemptIndex: 0,
+        noButtonAttempts: 0
     };
 
     function updateWatchdogHeartbeat() {
@@ -134,6 +136,8 @@ var PX = PX || {};
         const currentURL = window.location.href;
         const armCfg = config.armSwitchTask || {};
         const goldLabel = armCfg.trainingGoldLabel || 'Training Arm Gold';
+        const fallbackLabels = Array.from(new Set([goldLabel].concat(armCfg.fallbackArmLabels || [armCfg.arenaArmLabel || 'Arena Arm'])));
+        const currentArmLabel = fallbackLabels[Math.min(morning.armAttemptIndex, fallbackLabels.length - 1)];
 
         // Step 1: if not on teleop pages, navigate to robots-center
         if (!currentURL.includes('/robots-center') && !currentURL.includes('/tele-op') && !currentURL.includes('/live-control')) {
@@ -144,16 +148,19 @@ var PX = PX || {};
             return;
         }
 
-        // Step 2: if on robots-center, click the Gold arm card to enter tele-op
+        // Step 2: if on robots-center, click Gold first, then fallback arms.
         if (currentURL.includes('/robots-center')) {
-            console.log("[Morning] on robots-center, clicking " + goldLabel + " card...");
-            PX.Panel.updateUI("早八: 选择 " + goldLabel + "...", "--", "--", "#66ccff", storage);
-            const card = PX.ArmSwitch ? PX.ArmSwitch.findArmCard(goldLabel) : null;
+            console.log("[Morning] on robots-center, clicking " + currentArmLabel + " card...");
+            PX.Panel.updateUI("早八: 选择 " + currentArmLabel + "...", "--", "--", "#66ccff", storage);
+            const card = PX.ArmSwitch ? PX.ArmSwitch.findArmCard(currentArmLabel) : null;
             if (card) {
                 try { card.click(); } catch (e) { console.error("[Morning] card click failed:", e); }
+                if (PX.ActionLock) PX.ActionLock.release('morning');
             } else {
-                console.log("[Morning] arm card not found, retrying...");
-                PX.Panel.updateUI("早八: 等待臂卡片加载...", "--", "--", "#ff3333", storage);
+                morning.armAttemptIndex = Math.min(morning.armAttemptIndex + 1, fallbackLabels.length - 1);
+                console.log("[Morning] arm card not found, trying fallback...");
+                PX.Panel.updateUI("早八: 当前臂不可用，尝试备用臂...", "--", "--", "#ff3333", storage);
+                if (PX.ActionLock) PX.ActionLock.release('morning');
             }
             return;
         }
@@ -163,17 +170,25 @@ var PX = PX || {};
         const enterBtn = waitForBtn(config.text.enter);
 
         if (!queueBtn && !enterBtn) {
+            morning.noButtonAttempts++;
             console.log("[Morning] no queue/enter button found after retries, will retry next loop");
             PX.Panel.updateUI("早八: 按钮未刷新，等待中...", "--", "--", "#ff3333", storage);
             if (PX.ActionLock) PX.ActionLock.release('morning');
+            if (morning.noButtonAttempts >= 3) {
+                console.log("[Morning] entering live-control by URL fallback...");
+                window.location.href = armCfg.liveControlURL || 'https://app.prismax.ai/live-control';
+                return;
+            }
             return;
         }
 
+        morning.noButtonAttempts = 0;
         console.log("[Morning] triggering! resetting counts.");
         notifier.notifyMorningTrigger();
 
         storage.setCount(0);
         storage.resetAnomaly();
+        if (PX.Controller && PX.Controller.resetStats) PX.Controller.resetStats();
         const c = document.getElementById('p-count');
         if (c) c.innerText = "0";
         PX.Panel.updateAnomalyUI(storage);

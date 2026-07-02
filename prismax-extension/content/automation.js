@@ -113,34 +113,37 @@ var PX = PX || {};
 
         PX.Morning.updateMorningInfo(config, storage);
 
-        // Comment task timeout detection
-        if (storage.isCommentInProgress() && storage.isCommentTaskTimeout()) {
-            console.log('[评论任务] ⚠️ 主循环检测到任务超时，执行自动重置');
-            storage.resetCommentTaskState();
-            PX.Panel.updateCommentTaskUI(storage);
-        }
+        const commentEnabled = false;
+        if (commentEnabled) {
+            // Comment task timeout detection
+            if (storage.isCommentInProgress() && storage.isCommentTaskTimeout()) {
+                console.log('[评论任务] ⚠️ 主循环检测到任务超时，执行自动重置');
+                storage.resetCommentTaskState();
+                PX.Panel.updateCommentTaskUI(storage);
+            }
 
-        // Comment task trigger
-        const commentWin = PX.CommentTask.getCommentWindowMs(config);
-        if (commentWin && !storage.isCommentTaskDone() && !storage.isCommentInProgress()) {
-            const { startMs, endMs } = commentWin;
-            if (config.commentTask.randomInsideWindow) {
-                let targetMs = storage.getCommentTarget();
-                if (!targetMs || targetMs < startMs || targetMs > endMs) {
-                    targetMs = PX.Utils.getRandomInt(startMs, endMs - 1);
-                    storage.setCommentTarget(targetMs);
-                    console.log("[评论任务] 生成并保存触发时间:", new Date(targetMs).toLocaleTimeString());
-                }
-                if (now >= targetMs && now <= endMs) {
-                    PX.CommentTask.performCommentTask(config, storage, notifier);
-                }
-            } else {
-                if (now >= startMs && now <= endMs) {
-                    PX.CommentTask.performCommentTask(config, storage, notifier);
+            // Comment task trigger
+            const commentWin = PX.CommentTask.getCommentWindowMs(config);
+            if (commentWin && !storage.isCommentTaskDone() && !storage.isCommentInProgress()) {
+                const { startMs, endMs } = commentWin;
+                if (config.commentTask.randomInsideWindow) {
+                    let targetMs = storage.getCommentTarget();
+                    if (!targetMs || targetMs < startMs || targetMs > endMs) {
+                        targetMs = PX.Utils.getRandomInt(startMs, endMs - 1);
+                        storage.setCommentTarget(targetMs);
+                        console.log("[评论任务] 生成并保存触发时间:", new Date(targetMs).toLocaleTimeString());
+                    }
+                    if (now >= targetMs && now <= endMs) {
+                        PX.CommentTask.performCommentTask(config, storage, notifier);
+                    }
+                } else {
+                    if (now >= startMs && now <= endMs) {
+                        PX.CommentTask.performCommentTask(config, storage, notifier);
+                    }
                 }
             }
+            PX.Panel.updateCommentTaskUI(storage);
         }
-        PX.Panel.updateCommentTaskUI(storage);
 
         // Pause check
         if (PX._scriptPaused) {

@@ -25,6 +25,7 @@ from config_shared import (
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 BRIDGE_SCRIPT = os.path.join(ROOT_DIR, "Bridge_v2.py")
 BOT_SCRIPT = os.path.join(ROOT_DIR, "prismax_bot_v2.5_crossplatform.py")
+VLA_SCHEDULER_SCRIPT = os.path.join(ROOT_DIR, "prismax_auto_judge", "daily_orchestrator.py")
 HEALTH_URL = f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/health"
 LOG_DIR = os.path.join(ROOT_DIR, "logs")
 SUMMARY_INTERVAL_SECONDS = 60
@@ -104,7 +105,7 @@ def health_state_key(health):
     )
 
 
-def alert_key(health, bridge_proc, bot_proc):
+def alert_key(health, bridge_proc, bot_proc, vla_proc):
     keys = []
     if not health.get("bridge_alive"):
         keys.append("bridge_down")
@@ -116,6 +117,8 @@ def alert_key(health, bridge_proc, bot_proc):
         keys.append("bridge_process_exited")
     if bot_proc and bot_proc.poll() is not None:
         keys.append("bot_process_exited")
+    if vla_proc and vla_proc.poll() is not None:
+        keys.append("vla_scheduler_exited")
     return tuple(keys)
 
 
@@ -126,6 +129,7 @@ def main():
     bridge_proc = start_process(BRIDGE_SCRIPT, "Bridge")
     time.sleep(1)
     bot_proc = start_process(BOT_SCRIPT, "Python controller")
+    vla_proc = start_process(VLA_SCHEDULER_SCRIPT, "VLA scheduler")
 
     last_alert = None
     last_state = None
@@ -137,7 +141,7 @@ def main():
             heartbeat = read_json(os.path.join(ROOT_DIR, PYTHON_HEARTBEAT_FILE))
             summary = summarize_health(health)
             state_key = health_state_key(health)
-            current_alert = alert_key(health, bridge_proc, bot_proc)
+            current_alert = alert_key(health, bridge_proc, bot_proc, vla_proc)
 
             should_print_summary = (
                 state_key != last_state

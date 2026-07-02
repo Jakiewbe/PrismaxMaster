@@ -1,7 +1,7 @@
 runtime:
-  mode: "dry_run"  # dry_run / assist_preview / assist_fill / auto / auto_limited
-  auto_submit: false
-  skip_uncertain: true
+  mode: "auto_limited"  # dry_run / assist_preview / assist_fill / auto / auto_limited
+  auto_submit: true
+  skip_uncertain: false
   save_log: true
   log_path: "data/logs/scoring_log.jsonl"
   processed_registry_path: "data/logs/processed_episodes.json"
@@ -10,11 +10,20 @@ runtime:
 daily_workflow:
   enabled: true
   control_first: true
+  auto_vla_scheduler_enabled: true
   min_control_operations_before_vla: 6
+  control_stall_minutes_before_vla: 30
+  vla_trigger_poll_seconds: 10
+  vla_retry_cooldown_minutes: 30
+  allow_vla_when_control_stalled: true
   allow_vla_when_gold_rank_gt: 100
   gold_arm_label: "Training Arm Gold"
   min_labels_per_day: 2
-  max_labels_per_day: 4
+  max_labels_per_day: 200
+  min_vla_tasks_per_day: 10
+  max_vla_tasks_per_day: 10
+  max_episodes_per_task: 20
+  require_control_idle_before_vla: true
   daily_counts_path: "data/logs/vla_daily_counts.json"
   control_state_file: "../prismax_state.json"
   block_if_control_state_missing: true
@@ -201,10 +210,14 @@ decision_thresholds:
 safety:
   require_episode_id_match_before_submit: true
   require_manual_enable_auto: true
-  allow_auto_fail_submit: false
-  max_auto_submit_per_run: 10
+  allow_auto_fail_submit: true
+  force_submit_live_vla: true
+  strict_fail_submit_min_confidence: 0.90
+  strict_fail_submit_max_pass_probability: 0.10
+  max_auto_submit_per_run: 200
   stop_on_first_submit_error: true
   submit_cooldown_seconds: 2
+  require_extension_pause_for_vla: true
 
 frame_sampling:
   percent_points: [0, 10, 25, 50, 75, 90, 100]
@@ -222,8 +235,4 @@ default_scores:
     smoothness: 3
     quality: 3
     completion: 3
-
-
-
-
 

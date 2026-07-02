@@ -324,6 +324,44 @@ class ConservativeVlaConfigTests(unittest.TestCase):
         self.assertLessEqual(thresholds["auto_fail_max_probability"], 0.15)
         self.assertGreaterEqual(thresholds["min_confidence_submit"], 0.85)
 
+    def test_live_vla_forces_submit_policy(self) -> None:
+        config, _ = load_config(ROOT / "config.yaml")
+        self.assertEqual(config["runtime"]["mode"], "auto_limited")
+        self.assertTrue(config["runtime"]["auto_submit"])
+        self.assertTrue(config["safety"]["force_submit_live_vla"])
+        self.assertTrue(config["safety"]["allow_auto_fail_submit"])
+        self.assertEqual(config["daily_workflow"]["min_vla_tasks_per_day"], 10)
+        self.assertEqual(config["daily_workflow"]["max_vla_tasks_per_day"], 10)
+        self.assertGreaterEqual(config["daily_workflow"]["max_labels_per_day"], 200)
+
+    def test_middle_ground_pass_still_submits(self) -> None:
+        config, config_hash = load_config(ROOT / "config.yaml")
+        scorer = PrismaXScorer(config, config_hash)
+        result = scorer._decide_from_vlm(
+            "low_conf_pass",
+            {"_aggregate": {}},
+            [],
+            [],
+            [],
+            {},
+            {
+                "clear_camera_feed": True,
+                "task_completed_as_instructed": True,
+                "robot_hand_stays_in_frame": True,
+                "all_cameras_in_sync": True,
+                "robot_control_quality": 3,
+                "movement_smoothness": 3,
+                "task_completion_speed": 3,
+                "task_fully_completed": 3,
+                "failure_modes": [],
+                "pass_probability": 0.50,
+                "confidence": 0.30,
+                "reason": "low confidence middle case",
+            },
+        )
+        self.assertEqual(result["decision"], "PASS")
+        self.assertTrue(result["should_submit"])
+
 
 class LiveWorkflowStepTests(unittest.TestCase):
     def test_only_return_arm_bypasses_workflow_gate(self) -> None:
@@ -340,3 +378,179 @@ class LiveWorkflowStepTests(unittest.TestCase):
 
 
 
+
+class VlaTaskWorkflowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config, _ = load_config(ROOT / "config.yaml")
+
+    def test_daily_workflow_blocks_when_task_quota_reached(self) -> None:
+        from workflow_policy import DailyWorkflowPolicy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.config["daily_workflow"]["daily_counts_path"] = "counts.json"
+            self.config["daily_workflow"]["max_vla_tasks_per_day"] = 1
+            self.config["daily_workflow"]["control_first"] = False
+            policy = DailyWorkflowPolicy(self.config, tmp)
+            policy.record_vla_task_result(True, 5, 5)
+            allowed, reason = policy.can_attempt_vla()
+            self.assertFalse(allowed)
+            self.assertIn("daily_vla_task_quota_reached", reason)
+
+    def test_daily_workflow_requires_control_idle_before_vla(self) -> None:
+        from workflow_policy import DailyWorkflowPolicy
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            state_path = tmp / "state.json"
+            state_path.write_text('{"totalOperations": 6, "isOperating": true}', encoding="utf-8")
+            config, _ = load_config(ROOT / "config.yaml")
+            config["daily_workflow"]["control_state_file"] = "state.json"
+            policy = DailyWorkflowPolicy(config, tmp)
+            allowed, reason = policy.is_control_ready()
+            self.assertFalse(allowed)
+            self.assertIn("control_not_idle_for_vla:isOperating", reason)
+
+    def test_control_adapter_can_pause_extension_control_loop(self) -> None:
+        from control_adapter import PrismaXControlAdapter
+
+        self.assertTrue(hasattr(PrismaXControlAdapter, "set_vla_control_pause"))
+
+    def test_live_full_uses_task_runner(self) -> None:
+        from main import run_live_once
+        import inspect
+
+        source = inspect.getsource(run_live_once)
+        self.assertIn("run_live_task", source)
+        self.assertIn("min_vla_tasks_per_day", source)
+        self.assertIn("force_workflow", source)
+
+    def test_force_live_submit_converts_uncertain_to_pass(self) -> None:
+        from main import force_live_submit_result
+
+        config, config_hash = load_config(ROOT / "config.yaml")
+        scorer = PrismaXScorer(config, config_hash)
+        result = scorer._result(
+            "uncertain_live",
+            "UNCERTAIN",
+            False,
+            0.10,
+            "medium",
+            "uncertain",
+            {"_aggregate": {}},
+            [],
+            [],
+            [],
+        )
+        forced = force_live_submit_result(scorer, result, config)
+        self.assertEqual(forced["decision"], "PASS")
+        self.assertTrue(forced["should_submit"])
+        self.assertTrue(forced["form_plan"]["can_submit"])
+
+    def test_force_live_submit_converts_non_strict_fail_to_pass(self) -> None:
+        from main import force_live_submit_result
+
+        config, config_hash = load_config(ROOT / "config.yaml")
+        scorer = PrismaXScorer(config, config_hash)
+        result = scorer._result(
+            "soft_fail",
+            "FAIL",
+            True,
+            0.86,
+            "low",
+            "weak fail",
+            {"_aggregate": {}},
+            [],
+            [],
+            [],
+            pass_probability=0.14,
+        )
+        forced = force_live_submit_result(scorer, result, config)
+        self.assertEqual(forced["decision"], "PASS")
+        self.assertTrue(forced["should_submit"])
+
+    def test_force_live_submit_keeps_strict_fail(self) -> None:
+        from main import force_live_submit_result
+
+        config, config_hash = load_config(ROOT / "config.yaml")
+        scorer = PrismaXScorer(config, config_hash)
+        result = scorer._result(
+            "strict_fail",
+            "FAIL",
+            True,
+            0.95,
+            "low",
+            "strong fail",
+            {"_aggregate": {}},
+            ["main:black_frame_ratio"],
+            [],
+            [],
+            pass_probability=0.05,
+        )
+        forced = force_live_submit_result(scorer, result, config)
+        self.assertEqual(forced["decision"], "FAIL")
+        self.assertTrue(forced["should_submit"])
+
+
+class VlaSchedulerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config, _ = load_config(ROOT / "config.yaml")
+
+    def test_scheduler_triggers_after_six_control_ops(self) -> None:
+        from daily_orchestrator import decide_vla_trigger
+        from workflow_policy import DailyWorkflowPolicy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.config["daily_workflow"]["daily_counts_path"] = "counts.json"
+            self.config["daily_workflow"]["control_state_file"] = "missing.json"
+            self.config["daily_workflow"]["block_if_control_state_missing"] = False
+            workflow = DailyWorkflowPolicy(self.config, tmp)
+            scheduler_state = {
+                "date": "2026-07-02",
+                "baseline_control_count": 0,
+                "last_control_count": 6,
+                "last_control_change_at": 1000,
+            }
+            decision = decide_vla_trigger(self.config, workflow, {"totalOperations": 6}, scheduler_state, 1100)
+            self.assertTrue(decision.should_run)
+            self.assertTrue(decision.force_workflow)
+            self.assertIn("control_ops_ready", decision.reason)
+
+    def test_scheduler_triggers_when_control_stalled(self) -> None:
+        from daily_orchestrator import decide_vla_trigger
+        from workflow_policy import DailyWorkflowPolicy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.config["daily_workflow"]["daily_counts_path"] = "counts.json"
+            self.config["daily_workflow"]["control_stall_minutes_before_vla"] = 1
+            self.config["daily_workflow"]["control_state_file"] = "missing.json"
+            self.config["daily_workflow"]["block_if_control_state_missing"] = False
+            workflow = DailyWorkflowPolicy(self.config, tmp)
+            scheduler_state = {
+                "date": "2026-07-02",
+                "baseline_control_count": 0,
+                "last_control_count": 0,
+                "last_control_change_at": 1000,
+            }
+            decision = decide_vla_trigger(self.config, workflow, {"totalOperations": 0, "isQueuing": True}, scheduler_state, 1061)
+            self.assertTrue(decision.should_run)
+            self.assertTrue(decision.force_workflow)
+            self.assertIn("control_stalled", decision.reason)
+
+    def test_scheduler_does_not_trigger_while_operating(self) -> None:
+        from daily_orchestrator import decide_vla_trigger
+        from workflow_policy import DailyWorkflowPolicy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.config["daily_workflow"]["daily_counts_path"] = "counts.json"
+            self.config["daily_workflow"]["control_state_file"] = "missing.json"
+            self.config["daily_workflow"]["block_if_control_state_missing"] = False
+            workflow = DailyWorkflowPolicy(self.config, tmp)
+            scheduler_state = {
+                "date": "2026-07-02",
+                "baseline_control_count": 0,
+                "last_control_count": 6,
+                "last_control_change_at": 1000,
+            }
+            decision = decide_vla_trigger(self.config, workflow, {"totalOperations": 6, "isOperating": True}, scheduler_state, 1100)
+            self.assertFalse(decision.should_run)
+            self.assertIn("control_busy", decision.reason)

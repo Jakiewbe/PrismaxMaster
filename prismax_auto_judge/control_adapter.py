@@ -22,6 +22,7 @@ class PrismaXControlAdapter:
         self._playwright = None
         self._context = None
         self._last_playback_start: dict[str, Any] = {}
+        self._previous_script_paused: bool | None = None
 
     # ── lifecycle ──────────────────────────────────────────────
 
@@ -208,6 +209,64 @@ class PrismaXControlAdapter:
             time.sleep(4)
         else:
             raise RuntimeError("next_episode: nav button not found")
+
+    def set_vla_control_pause(self, active: bool) -> bool:
+        """Pause or restore the extension control loop while Python owns VLA."""
+        if not self._page:
+            raise RuntimeError("Browser page is not open")
+        result = self._page.evaluate(
+            """({active, previous}) => {
+                const px = window.PX;
+                if (!px || !px._scriptPausedRef) {
+                    return {ok: false, reason: 'px_not_ready'};
+                }
+                if (active) {
+                    const oldValue = Boolean(px._scriptPaused);
+                    px._vlaPreviousScriptPaused = oldValue;
+                    px._vlaPauseActive = true;
+                    px._scriptPaused = true;
+                    px._scriptPausedRef.value = true;
+                    try { localStorage.setItem('prismax_vla_active', '1'); } catch (e) {}
+                    return {ok: true, previous: oldValue};
+                }
+                const restoreValue = previous === null || previous === undefined
+                    ? Boolean(px._vlaPreviousScriptPaused)
+                    : Boolean(previous);
+                px._scriptPaused = restoreValue;
+                px._scriptPausedRef.value = restoreValue;
+                px._vlaPauseActive = false;
+                try { localStorage.setItem('prismax_vla_active', '0'); } catch (e) {}
+                return {ok: true, previous: restoreValue};
+            }""",
+            {"active": bool(active), "previous": self._previous_script_paused},
+        )
+        if not result or not result.get("ok"):
+            return False
+        if active:
+            self._previous_script_paused = bool(result.get("previous"))
+        else:
+            self._previous_script_paused = None
+        return True
+
+    def increment_vla_submitted_today(self) -> bool:
+        """Update the extension-visible daily VLA submit count after a real submit."""
+        if not self._page:
+            raise RuntimeError("Browser page is not open")
+        try:
+            return bool(self._page.evaluate(
+                """() => {
+                    try {
+                        const key = 'prismax_vla_submitted_today';
+                        const current = Number(localStorage.getItem(key) || '0');
+                        localStorage.setItem(key, String(current + 1));
+                        return true;
+                    } catch (e) {
+                        return false;
+                    }
+                }"""
+            ))
+        except Exception:
+            return False
 
     def skip_episode(self, reason: str = "") -> None:
         """Skip current episode (just log reason, move to next)."""
@@ -1029,10 +1088,3 @@ def iter_local_episodes(video_dir: str | Path) -> Iterator[dict[str, Any]]:
                 "video_paths": seg_list[0]["video_paths"],
                 "metadata": {"source": "local_folder"},
             }
-
-
-
-
-
-
-
