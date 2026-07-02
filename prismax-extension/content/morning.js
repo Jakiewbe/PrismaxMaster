@@ -158,12 +158,12 @@ var PX = PX || {};
             return;
         }
 
-        // Step 3: on tele-op page, look for queue/enter buttons
-        const queueBtn = findBtn(config.text.queuing);
-        const enterBtn = findBtn(config.text.enter);
+        // Step 3: on tele-op page, look for queue/enter buttons (with retry)
+        const queueBtn = waitForBtn(config.text.queuing);
+        const enterBtn = waitForBtn(config.text.enter);
 
         if (!queueBtn && !enterBtn) {
-            console.log("[Morning] no queue/enter button found, retrying...");
+            console.log("[Morning] no queue/enter button found after retries, will retry next loop");
             PX.Panel.updateUI("早八: 按钮未刷新，等待中...", "--", "--", "#ff3333", storage);
             if (PX.ActionLock) PX.ActionLock.release('morning');
             return;
@@ -203,14 +203,28 @@ var PX = PX || {};
         }
     }
 
-    // Helper: find button by keywords
+    // Helper: find button by keywords (uses local config, retries if not found)
     function findBtn(keywords) {
-        const enterKeys = PX._config && PX._config.text ? PX._config.text.enter : [];
-        const blacklist = PX._config && PX._config.text ? PX._config.text.blacklist : [];
+        const cfg = PX._config;
+        const enterKeys = cfg && cfg.text ? cfg.text.enter : [];
+        const blacklist = cfg && cfg.text ? cfg.text.blacklist : [];
+        // Compare by content, not reference
+        const isEnter = keywords.length === enterKeys.length && keywords.every((k, i) => k === enterKeys[i]);
         return PX.Utils.findClickableByKeywords(keywords, {
             blacklist: blacklist,
-            excludeLeave: keywords === enterKeys
+            excludeLeave: isEnter
         });
+    }
+
+    function waitForBtn(keywords, maxAttempts = 10) {
+        for (let i = 0; i < maxAttempts; i++) {
+            const btn = findBtn(keywords);
+            if (btn && !btn.disabled) return btn;
+            // Brief sleep between retries
+            const start = Date.now();
+            while (Date.now() - start < 200) { /* busy-wait */ }
+        }
+        return null;
     }
 
     // Check if currently in morning window
